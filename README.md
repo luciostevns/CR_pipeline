@@ -1,62 +1,67 @@
-**Computationally predicting T-cell cross-reactivity**
+# Computational Prediction of T-cell Cross-Reactivity
 
-**induced autoimmunity with pathogenic proteome**
+## Overview
 
+This project aims to identify potential sequence similarity between known autoimmune T-cell epitopes and pathogen proteomes. The goal is to investigate whether molecular mimicry may contribute to autoimmune responses.
 
+The pipeline integrates data from IEDB, UniProt, and NCBI to detect shared peptide motifs between human autoantigens and pathogenic proteins.
 
-The purpose of the following project is to locate possible sequence
+---
 
-alignment between pathogenic proteins and known autoimmune epitopes.
+## Data Sources
 
+### IEDB (Immune Epitope Database)
+- Source: https://www.iedb.org/
+- Contains experimentally validated T-cell epitopes
+- Required fields:
+  - Assay ID
+  - Epitope sequence
+  - Protein source
+  - Protein ID
+  - Disease
+  - Disease stage
+  - MHC restriction
+  - Epitope start/end positions
+  - Modified residues
 
+---
 
+### UniProt
+- Source: https://www.uniprot.org/
+- Used to download pathogen proteomes
+- Assembly ID required for matching
 
+---
 
-DATA COLLECTION:
+### NCBI Pathogen Database
+- Source: https://www.ncbi.nlm.nih.gov/pathogens/
+- Used to verify pathogenicity of selected organisms
 
+---
 
+## Project Structure
 
-* Collect data from IEDB.org with epitopes and metadata of interest, this should at the vary least contain protein sequences.
+```
+CR_pipeline/
+├── data/
+│   ├── raw/
+│   ├── intermediate/
+│   └── processed/
+├── results/
+│   ├── figures/
+│   └── tables/
+├── scripts/
+│   ├── python/
+│   └── r/
+├── requirements.txt
+└── README.md
+```
 
-   Current script is specific for the following metadata: (Assay ID - IEDB IRI, Epitope - Name, Epitope - Molecule Parent,
+---
 
-   Epitope - Molecule Parent IRI, 1st in vivo Process - Disease, 1st in vivo Process - Disease Stage, MHC Restriction - Name,
+## Setup
 
-   Epitope - Starting Position, Epitope - Ending Position Epitope - Modified residues). If not change script to fit metadata
+Clone the repository and create a virtual environment:
 
-
-
-* Collect data from uniport.org with proteomes of pathogens of interest and download .tsv file.
-
-   Including Assembly id is important.
-
- 
-
-* Collect data from ncbi.nlm.nih.gov/pathogens/isolates (This is for verifying chosen pathogens are pathogenic).
-
-   Including Assembly id is important.
-
-
-
-
-
-
-
-CODE STUFF (REPLACE WITH BETTER HEADER)
-
-
-
-1\. Clean data and filter (./R\_stuff/IEDB\_wrangling.R). This will filter protein of being in
-
-   specific length range (12-25), it will remove if one epitope is nested in a bigger
-
-   epitope, making it redundant. Then it will generate all possible 9mers of each epitope
-
-   it will then write a .csv file, with chosen columns as columns and each row being a 9mer
-
-
-
-
-
- 
-
+```bash
+python -m venv .venv
