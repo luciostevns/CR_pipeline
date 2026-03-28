@@ -1,15 +1,13 @@
-#%%
+# Imports
 import pandas as pd
 import re
-from helpers import load_tsv
+from collections import defaultdict
+from helpers import load_excel, save_csv, DATA_DIR
 
 ################ Initial filtering and wrangling ###############################
 
 # Read the full IEDB dataset
-autoimmune_data = pd.read_csv(
-    "./../Data/tcell_table_export_1740575887.tsv",
-    sep="\t"
-)
+autoimmune_data = load_excel(DATA_DIR / "raw/IEDB_autoimmune_epitope_assays_raw.xlsx")
 
 # Rename columns
 autoimmune_data = autoimmune_data.rename(columns={
@@ -78,17 +76,24 @@ expanded_9mers = (
 )
 
 # Precompute for speed
-expanded_9mers_list = list(
-    zip(expanded_9mers["Nine_mers"], expanded_9mers["Sequence"].str.len())
-)
+nine_mer_dict = defaultdict(list)
+
+for nine_mer, seq_len in zip(
+    expanded_9mers["Nine_mers"],
+    expanded_9mers["Sequence"].str.len()
+):
+    nine_mer_dict[nine_mer].append(seq_len)
 
 # Identify nested sequences
 def is_nested(row):
     seq_len = len(row["Sequence"])
+
     for nine_mer in row["Nine_mers"]:
-        for other_nine_mer, other_len in expanded_9mers_list:
-            if nine_mer == other_nine_mer and other_len > seq_len:
-                return True
+        if nine_mer in nine_mer_dict:
+            for other_len in nine_mer_dict[nine_mer]:
+                if other_len > seq_len:
+                    return True
+
     return False
 
 autoimmune_data_wrangled["Is_nested"] = autoimmune_data_wrangled.apply(
@@ -102,9 +107,4 @@ filtered_sequences = autoimmune_data_wrangled[
 ].drop(columns=["Nine_mers", "Is_nested"])
 
 # Write output
-filtered_sequences.to_csv(
-    "./../Data/wrangled_IEDB.csv",
-    index=False
-)
-
-# %%
+save_csv(filtered_sequences, DATA_DIR / "intermediate/wrangled_IEDB.csv")
