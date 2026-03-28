@@ -1,0 +1,22 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data (adjust depending on what you want to share)
+data/raw/
+data/intermediate/
+data/processed/
+
+# Results (optional)
+results/

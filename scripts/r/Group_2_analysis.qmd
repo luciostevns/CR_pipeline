@@ -1,0 +1,433 @@
+---
+title: "perfect_match_wrangling_3_0"
+format: revealjs
+editor: visual
+---
+
+# Group 2 analysis:
+
+### Libraries:
+
+```{r}
+library("tidyverse")
+library("tidytext")
+library("Biostrings")
+library("ggvenn")
+library("ggtree")
+library("pwalign")
+```
+
+### Data import:
+
+```{r}
+perfect_match <- read_csv("../Data/perfect_matches_finished.csv")
+
+perfect_match <- perfect_match |>
+    mutate(
+    Epitope_Source = case_when(
+      str_detect(Epitope_Source, "acetyltransferase component of pyruvate dehydrogenase complex") ~ "acetyltransferase",
+      TRUE ~ Epitope_Source
+    ))
+
+pathogen_data <- read_csv("../Data/wrangled_all_pathogen_prots.csv")
+
+pathogen_data <- pathogen_data |>
+  dplyr::rename("Pathogen_Annotation" = "Annotation",
+                "Organism_Source" = Genus_Species) |>
+  rowwise() |>
+  mutate(protein_len = str_length(Sequence))
+
+IEDB_data <- read_csv("../Data/wrangled_IEDB_with_sequences.csv")
+
+IEDB_data <- IEDB_data |>
+  dplyr::rename(IEDB_Protein_ID = "Protein_ID",
+         Epitope_Source = "Protein_source") |>
+  mutate(
+    Epitope_Source = case_when(
+      str_detect(Epitope_Source, "acetyltransferase component of pyruvate dehydrogenase complex") ~ "acetyltransferase",
+      TRUE ~ Epitope_Source
+    ))
+
+
+fasta_files <- list.files("../Data/proteome_fastas_strain", pattern = "\\.fasta$", full.names = TRUE)
+
+epitope_attributes <- readRDS("../Data/epitope_attributes.rds")
+```
+
+### Pathogen information:
+
+```{r}
+# Function to extract genus_species from first header line
+extract_genus_species_and_strain <- function(file) {
+  fasta <- readAAStringSet(file)
+  if (length(fasta) == 0) {
+    return(tibble(
+      Proteome_ID = basename(tools::file_path_sans_ext(file)),
+      Genus_Species = NA,
+      Strain = "unknown strain"
+    ))
+  }
+
+  header <- names(fasta)[1]
+
+  # Extract full OS field (up to OX)
+  full_os <- str_match(header, "OS=([^=]+?) OX=")[,2]
+  if (is.na(full_os)) {
+    return(tibble(
+      Proteome_ID = basename(tools::file_path_sans_ext(file)),
+      Genus_Species = NA,
+      Strain = "unknown strain"
+    ))
+  }
+
+  words <- str_split(full_os, "\\s+")[[1]]
+  genus_species <- str_c(words[1:2], collapse = " ")
+  strain <- if (length(words) > 2) {
+    str_c(words[3:length(words)], collapse = " ")
+  } else {
+    "unknown strain"
+  }
+
+  return(tibble(
+    Proteome_ID = basename(tools::file_path_sans_ext(file)),
+    Genus_Species = genus_species,
+    Strain = strain
+  ))
+}
+
+# Apply function to all FASTA files
+Original_organism_df <- map_dfr(fasta_files, extract_genus_species_and_strain)
+```
+
+### Epitope group analysis:
+
+```{r}
+IEDB_match_count <- IEDB_data |>
+  group_by(Epitope_Source) |>
+  summarise(original_match_count = n()) |>
+  filter(!is.na(Epitope_Source)) |>
+  arrange(desc(original_match_count))
+
+# Step 1: Count unique pathogen matches per epitope (Assay_ID)
+epitope_match_counts <- perfect_match |>
+  distinct(Assay_ID, Pathogen_Protein_ID, .keep_all = TRUE) |>
+  group_by(Assay_ID) |>
+  summarise(match_count = n(),
+            Epitope_Source = unique(Epitope_Source)) |>
+  arrange(desc(match_count))
+
+epitope_source_match_counts <- perfect_match |>
+  distinct(Assay_ID, Pathogen_Protein_ID, .keep_all = TRUE) |>
+  group_by(Epitope_Source) |>
+  summarise(match_count = n()) |>
+  left_join(IEDB_match_count, by = "Epitope_Source") |>
+  mutate(normalized_match_count = match_count/original_match_count)
+
+
+# Step 4: Plot 1 — Match counts per individual epitope
+ggplot(epitope_match_counts, aes(x = reorder(Assay_ID, match_count), y = match_count)) +
+  geom_col() +
+  coord_flip() +
+  scale_x_discrete(labels = setNames(epitope_match_counts$Epitope_Source, epitope_match_counts$Assay_ID)) +
+  labs(
+    title = "Top 20 Pathogen Matches per Autoimmune Epitope",
+    subtitle = "Each bar represents a unique IEDB epitope (Assay_ID), labeled by its source protein",
+    x = "Epitope Source (Protein Name)",
+    y = "Unique Pathogen Protein Matches"
+  ) +
+  theme_minimal(base_size = 13)
+
+
+# Step 5: Plot 2 — Aggregate matches per source protein (parent molecule)
+ggplot(epitope_source_match_counts, aes(x = reorder(Epitope_Source, match_count), y = match_count)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Cumulative Pathogen Matches per Epitope Source",
+    subtitle = "Total unique matches summed across all epitopes derived from the same parent protein",
+    x = "Epitope Source (Protein Name)",
+    y = "Total Unique Pathogen Protein Matches"
+  ) +
+  theme_minimal(base_size = 13)
+
+
+# Step 6: Plot 3 — Normalized matches per source protein
+ggplot(epitope_source_match_counts, aes(x = reorder(Epitope_Source, normalized_match_count), y = normalized_match_count)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Normalized Pathogen Matches per Epitope Source",
+    subtitle = "Number of pathogen matches normalized by how many epitopes were reported for that protein in IEDB",
+    x = "Epitope Source (Protein Name)",
+    y = "Normalized Match Count (Matches per Epitope)"
+  ) +
+  theme_minimal(base_size = 13)
+
+ggplot(IEDB_match_count, aes(x = original_match_count)) +
+  geom_histogram(binwidth = 1, fill = "skyblue", color = "white") +
+  labs(
+    x = "Number of Epitopes in Epitope Source",
+    y= "Frequency of bin"
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, max(IEDB_match_count$original_match_count, na.rm = TRUE), by = 50)
+  ) +
+  theme_minimal()
+
+ggplot(IEDB_match_count,
+       aes(x = reorder(Epitope_Source, original_match_count),
+                             y = original_match_count)) +
+  geom_col() +
+  labs(
+    x = "Epitopes",
+    y= "Epitope count") +
+  theme_minimal() +
+    theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 6),
+    axis.title.y = element_text(size = 10))
+
+ggplot(epitope_match_counts, aes(x = match_count)) +
+  geom_histogram(binwidth = 3, fill = "skyblue", color = "white") +
+  labs(
+    x = "Number of epitope-pathogen protein matches",
+    y= "Frequency of bin"
+  ) +
+  theme_minimal()
+```
+
+### Group 2 extraction:
+
+```{r}
+
+conserved_prot <- c("P0DMV9", "P10809", "P11021", "P06733")
+
+grouped_perfect_match <- epitope_attributes |>
+  mutate(
+    group = case_when(
+      IEDB_Protein_ID %in% conserved_prot ~ "3",
+      n_matches > 0 ~ "2",
+      n_matches == 0 ~ "1",
+    )
+  )
+
+```
+
+### Pathogen epitope association:
+
+```{r}
+# Get the original number of strains per organism
+original_number_strains <- Original_organism_df |>
+  group_by(Genus_Species) |>
+  summarise(original_num_strains = n(), .groups = "drop")
+
+# Prepare the heatmap summary
+pathogen_heatmap_epitope <- grouped_perfect_match |>
+  filter(group == 2) |>
+  unnest(matched_pathogens) |>
+  group_by(Assay_ID, pathogen_species) |>
+  summarise(
+    num_strains = n_distinct(Strain),
+    Epitope_Source = unique(IEDB_Protein_ID),
+    .groups = "drop"
+  ) |>
+  left_join(original_number_strains,
+            by = c("pathogen_species" = "Genus_Species")) |>
+  mutate(strain_ratio = num_strains / original_num_strains) |>
+  separate(pathogen_species, into = c("Genus", "Species"), sep = " ", extra = "merge", remove = FALSE)
+
+# Prepare heatmap summary by Disease instead of Epitope Source
+pathogen_heatmap_disease <- grouped_perfect_match |>
+  filter(group == 2) |>
+  unnest(matched_pathogens) |>
+  group_by(Assay_ID, pathogen_species) |>
+  summarise(
+    num_strains = n_distinct(Strain),
+    Disease = unique(Disease),  # <-- here we keep the Disease instead of Epitope_Source
+    .groups = "drop"
+  ) |>
+  left_join(original_number_strains,
+            by = c("pathogen_species" = "Genus_Species")) |>
+  mutate(strain_ratio = num_strains / original_num_strains) |>
+  separate(pathogen_species, into = c("Genus", "Species"), sep = " ", extra = "merge", remove = FALSE)
+
+
+ggplot(pathogen_heatmap_epitope, aes(x = Epitope_Source, y = fct_rev(Species), fill = strain_ratio)) +
+  geom_tile(color = "grey80", linewidth = 0.4) +
+  scale_fill_viridis_c(
+    name = "Ratio of strains in species\nmatched to epitope\ncompared to total",
+    option = "D"  # other options: "D", "B", "A"
+  ) +
+  facet_grid(Genus ~ ., scales = "free_y", space = "free") +
+  theme_light(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 55, hjust = 1, vjust = 1, size = 8),
+    axis.text.y = element_text(size = 6),
+    axis.title.y = element_text(size = 10),
+    strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"),
+    panel.spacing = unit(0.3, "lines"),
+    panel.grid.major.x = element_line(color = "black"),
+    panel.grid.major.y = element_line(color = "grey90"),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8)
+  ) +
+  labs(
+    x = "Epitopes",
+    y = "Species"
+  )
+
+# Plot the new heatmap
+ggplot(pathogen_heatmap_disease, aes(x = Disease, y = fct_rev(Species), fill = strain_ratio)) +
+  geom_tile(color = "grey80", linewidth = 0.4) +
+  scale_fill_viridis_c(
+    name = "Ratio of strains in species\nmatched to disease\ncompared to total",
+    option = "D"
+  ) +
+  facet_grid(Genus ~ ., scales = "free_y", space = "free") +
+  theme_light(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 55, hjust = 1, vjust = 1, size = 8),
+    axis.text.y = element_text(size = 6),
+    axis.title.y = element_text(size = 10),
+    strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"),
+    panel.spacing = unit(0.3, "lines"),
+    panel.grid.major.x = element_line(color = "black"),
+    panel.grid.major.y = element_line(color = "grey90"),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8)
+  ) +
+  labs(
+    x = "Associated Disease",
+    y = "Species"
+  )
+
+```
+
+### Protein Accessibility visualization:
+
+```{r}
+
+accessibility_heatmap_epitope <- perfect_match_group_2 |>
+  group_by(Epitope_Source, Pathogen_Protein_ID,
+           pathogen_prot_Subcellular_Location) |>
+  mutate(
+    Subcellular_Location = if_else(is.na(pathogen_prot_Subcellular_Location), "Unknown", pathogen_prot_Subcellular_Location)
+  )
+
+accessibility_heatmap_disease <- perfect_match_group_2 |>
+  group_by(Disease, Pathogen_Protein_ID,
+           pathogen_prot_Subcellular_Location) |>
+  mutate(
+    Subcellular_Location = if_else(is.na(pathogen_prot_Subcellular_Location), "Unknown", pathogen_prot_Subcellular_Location)
+  )
+
+ggplot(accessibility_heatmap_epitope, aes(x = Epitope_Source, y = fct_rev(Pathogen_Protein_ID), fill = p_value_asa)) +
+  geom_tile(color = "grey80") +
+  scale_fill_viridis_c(
+    name = "p-value\n(segment availability)",
+    option = "D",
+    direction = -1,  # darker color = more significant
+    limits = c(0, 0.2),  # focus on the most relevant range
+    oob = scales::squish,
+    breaks = c(0, 0.01, 0.05, 0.1, 0.2),
+    labels = c("≤ 0.001", "0.01", "0.05", "0.1", "≥ 0.2")
+  ) +
+  facet_grid(Subcellular_Location ~ ., scales = "free_y", space = "free") +
+  labs(
+    title = "Group 2 Epitope–Pathogen Protein Associations by Subcellular Location",
+    x = "Epitope Source",
+    y = "Pathogen Proteins"
+  ) +
+  theme_light(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 80, hjust = 1, vjust = 1, size = 8),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_text(size = 10),
+    strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"),
+    panel.spacing = unit(0.3, "lines"),
+    panel.grid.major.x = element_line(color = "black"),
+    panel.grid.major.y = element_line(color = "grey90"),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8)
+  )
+
+ggplot(accessibility_heatmap_disease, aes(x = Disease, y = fct_rev(Pathogen_Protein_ID), fill = p_value_asa)) +
+  geom_tile(color = "grey80") +
+  scale_fill_viridis_c(
+    name = "p-value\n(segment availability)",
+    option = "D",
+    direction = -1,  # darker color = more significant
+    limits = c(0, 0.2),  # focus on the most relevant range
+    oob = scales::squish,
+    breaks = c(0, 0.01, 0.05, 0.1, 0.2),
+    labels = c("≤ 0.001", "0.01", "0.05", "0.1", "≥ 0.2")
+  ) +
+  facet_grid(Subcellular_Location ~ ., scales = "free_y", space = "free") +
+  labs(
+    title = "Group 2 Disease–Pathogen Protein Associations by Subcellular Location",
+    x = "Diseases",
+    y = "Pathogen Proteins"
+  ) +
+  theme_light(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 80, hjust = 1, vjust = 1, size = 8),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_text(size = 10),
+    strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"),
+    panel.spacing = unit(0.3, "lines"),
+    panel.grid.major.x = element_line(color = "black"),
+    panel.grid.major.y = element_line(color = "grey90"),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8)
+  )
+```
+
+### Species match per epitope:
+
+```{r}
+
+perfect_match |>
+  group_by(Assay_ID) |>
+  summarise(
+    Epitope_Source = unique(Epitope_Source)[1],  # just for labeling
+    n_unique_species = n_distinct(Organism_Source),
+    .groups = "drop"
+  ) |>
+  arrange(desc(n_unique_species)) |>
+  ggplot(aes(x = reorder(Assay_ID, n_unique_species),
+             y = n_unique_species)) +
+  geom_col() +
+  scale_x_discrete(labels = function(x) {
+    # Create named vector of labels: names = Assay_ID, values = Epitope_Source
+    labels_map <- perfect_match |>
+      distinct(Assay_ID, Epitope_Source) |>
+      deframe()
+    labels_map[x]
+  }) +
+  labs(
+    x = "Epitope Source (per Assay)",
+    y = "Number of species matched"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 70, hjust = 1, vjust = 1, size = 7),
+    axis.text.y = element_text(size = 6),
+    axis.title.y = element_text(size = 10)
+  )
+
+```
+
+```{r}
+# 1. Filter and prepare the sequences
+writeLines(
+  IEDB_data |>
+    distinct(IEDB_Protein_ID, .keep_all = TRUE) |>
+    filter(!is.na(Full_Sequence)) |>
+    mutate(fasta = paste0(">", IEDB_Protein_ID, "\n", Full_Sequence)) |>
+    pull(fasta),
+  "epitope_source_proteins_all.fasta"
+)
+
+```

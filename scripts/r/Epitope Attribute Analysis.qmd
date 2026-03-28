@@ -1,0 +1,1344 @@
+---
+title: "epitope attributes analysis"
+format: html
+editor: visual
+---
+
+# Epitope attributes analysis
+
+### Libraries:
+
+```{r}
+library("tidyverse")
+library("patchwork")
+library("Biostrings")
+```
+
+### Data import:
+
+```{r}
+perfect_match <- read_csv("../Data/perfect_matches_finished.csv")
+
+perfect_match <- perfect_match |>
+    mutate(
+    Epitope_Source = case_when(
+      str_detect(Epitope_Source, "acetyltransferase component of pyruvate dehydrogenase complex") ~ "acetyltransferase",
+      TRUE ~ Epitope_Source
+    )) |>
+  distinct(Assay_ID, Pathogen_Protein_ID, Strain, .keep_all = TRUE)
+
+
+IEDB_data <- read_csv("../Data/wrangled_IEDB_with_sequences.csv")
+
+IEDB_data <- IEDB_data |>
+  dplyr::rename(IEDB_Protein_ID = "Protein_ID",
+         Epitope_Source = "Protein_source") |>
+  mutate(
+    Epitope_Source = case_when(
+      str_detect(Epitope_Source, "acetyltransferase component of pyruvate dehydrogenase complex") ~ "acetyltransferase",
+      TRUE ~ Epitope_Source
+    ))
+
+
+NetsurfP_epitopes <- read_csv("../Data/NetsurfP_epitopes.csv")
+NetsurfP_pathogen_1 <- read_csv("../Data/NetsurfP_pathogen_1.csv")
+NetsurfP_pathogen_2 <- read_csv("../Data/NetsurfP_pathogen_2.csv")
+NetsurfP_pathogen_3 <- read_csv("../Data/NetsurfP_pathogen_3.csv")
+NetsurfP_pathogen_4 <- read_csv("../Data/NetsurfP_pathogen_4.csv")
+NetsurfP_pathogen_5 <- read_csv("../Data/NetsurfP_pathogen_5.csv")
+
+fasta_files <- list.files("../Data/proteome_fastas_strain", pattern = "\\.fasta$", full.names = TRUE)
+
+pathogen_data <- read_csv("../Data/wrangled_all_pathogen_prots.csv")
+
+pathogen_data <- pathogen_data |>
+  dplyr::rename("Pathogen_Annotation" = "Annotation",
+                "Organism_Source" = Genus_Species) |>
+  rowwise() |>
+  mutate(protein_len = str_length(Sequence))
+```
+
+### Epitope attribute table and RSA/subcellular addition:
+
+```{r}
+# Preprocessing NetsurfP
+NetsurfP_epitopes <- NetsurfP_epitopes |>
+  mutate(id = str_remove(id, "^>")) |>
+  group_by(id) |>
+  summarise(rsa = list(rsa), .groups = "drop")
+
+NetsurfP_pathogen <- bind_rows(
+  NetsurfP_pathogen_1,
+  NetsurfP_pathogen_2,
+  NetsurfP_pathogen_3,
+  NetsurfP_pathogen_4,
+  NetsurfP_pathogen_5
+) |>
+  mutate(id = str_remove(id, "^>")) |>
+  group_by(id) |>
+  summarise(rsa = list(rsa), .groups = "drop")
+
+# Clean up unused objects
+remove(NetsurfP_pathogen_1, NetsurfP_pathogen_2, NetsurfP_pathogen_3, NetsurfP_pathogen_4, NetsurfP_pathogen_5)
+
+# Join epitope + pathogen RSA
+perfect_match_with_rsa <- perfect_match |>
+  left_join(NetsurfP_epitopes, by = c("IEDB_Protein_ID" = "id")) |>
+  dplyr::rename(rsa_epitope_seq = rsa) |>
+  left_join(NetsurfP_pathogen, by = c("Pathogen_Protein_ID" = "id")) |>
+  dplyr::rename(rsa_pathogen_seq = rsa) |>
+  mutate(
+    # Mean RSA across the entire epitope's source protein
+    rsa_epitope_protein = map_dbl(rsa_epitope_seq, ~ if (is.numeric(.x)) mean(.x, na.rm = TRUE) else NA_real_),
+
+    # Mean RSA over the actual epitope region
+    rsa_epitope = pmap_dbl(
+      list(rsa_epitope_seq, epitope_start_pos, epitope_end_pos),
+      function(rsa_vec, start_pos, end_pos) {
+        if (!is.numeric(rsa_vec) || is.na(start_pos) || is.na(end_pos)) return(NA_real_)
+        mean(rsa_vec[start_pos:end_pos], na.rm = TRUE)
+      }
+    ),
+
+    # Mean RSA across the whole matched pathogen protein
+    rsa_pathogen_protein = map_dbl(rsa_pathogen_seq, ~ if (is.numeric(.x)) mean(.x, na.rm = TRUE) else NA_real_),
+
+    # Mean RSA over the matched region in the pathogen protein
+    rsa_pathogen_peptide = pmap_dbl(
+      list(rsa_pathogen_seq, Pathogen_Protein_Start_Pos, Pathogen_Protein_End_Pos),
+      function(rsa_vec, start_pos, end_pos) {
+        if (!is.numeric(rsa_vec) || is.na(start_pos) || is.na(end_pos)) return(NA_real_)
+        mean(rsa_vec[start_pos:end_pos], na.rm = TRUE)
+      }
+    )
+  ) |>
+  select(-rsa_pathogen_seq, -rsa_epitope_seq)
+
+
+# Aggregate at epitope level
+epitope_attributes <- perfect_match_with_rsa |>
+  group_by(Assay_ID, IEDB_Protein_ID, Epitope_Source, Disease) |>
+  reframe(
+    rsa_epitope_protein = unique(rsa_epitope_protein),
+    rsa_epitope         = unique(rsa_epitope),
+    epitope_location    = unique(epitope_deeploc_subcellular_location),
+    
+    matched_pathogens = list(tibble(
+      Pathogen_Protein_ID = Pathogen_Protein_ID,
+      rsa_pathogen_protein = rsa_pathogen_protein,
+      rsa_pathogen_peptide = rsa_pathogen_peptide,
+      pathogen_location = pathogen_deeploc_subcellular_location,
+      pathogen_species = Organism_Source,
+      Strain = Strain
+    )),
+    
+    n_matches = n_distinct(paste(Pathogen_Protein_ID, Strain)[!is.na(Pathogen_Protein_ID)]),
+    n_species = n_distinct(Organism_Source, na.rm = TRUE)
+  ) |>
+  mutate(Matched = n_matches > 0)
+```
+
+### Epitope attribute vizualization:
+
+```{r}
+# Theme: white background with black gridlines and borders
+my_theme <- theme_bw(base_size = 12) +
+  theme(
+    panel.grid.major = element_blank(),     # remove major gridlines
+    panel.grid.minor = element_blank(),     # remove minor gridlines
+    panel.border = element_blank(),         # remove full border box
+    axis.line = element_line(color = "black", linewidth = 0.5),  # keep x and y axis lines
+    axis.text.x = element_text(angle = 40, hjust = 1)
+  )
+
+
+# p2: Distribution of epitope region RSA, grouped by match status
+p1 <- epitope_attributes |>
+  ggplot(aes(x = rsa_epitope, fill = as.factor(Matched))) +
+  geom_histogram(bins = 30, position = "dodge", color = "white", alpha = 0.7) +
+  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100), labels = c("0", "1", "10", "100"), limits = c(0, 100)) +
+  labs(x = "Mean RSA of Epitope Region", y = "Epitipe frequency (log 10)", fill = "Matched") +
+  xlim(0, 1) +
+  my_theme +
+  theme(
+  axis.title.x = element_text(size = 8),
+  axis.title.y = element_text(size = 8)
+)
+
+
+# p4: Distribution of RSA values for pathogen regions matched to epitopes
+p2 <- epitope_attributes |>
+  filter(Matched) |>
+  unnest(matched_pathogens) |>
+  ggplot(aes(x = rsa_pathogen_peptide)) +
+  geom_histogram(bins = 30, fill = "darkorange", color = "white") +
+  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000), labels = c("0", "1", "10", "100", "1000")) +
+  labs(x = "Mean RSA of Matched Pathogen Region", y = "Peptide frequency (log 10)") +
+  xlim(0, 1) +
+  my_theme +
+  theme(
+  axis.title.x = element_text(size = 8),
+  axis.title.y = element_text(size = 8)
+)
+
+
+# Prepare data for boxplot
+df_p3 <- bind_rows(
+  epitope_attributes |> 
+    filter(!Matched) |> 
+    mutate(source = "Unmatched Epitope", value = rsa_epitope) |> 
+    select(source, value), epitope_attributes |> 
+    filter(Matched) |> 
+    mutate(source = "Matched Epitope", value = rsa_epitope) |> 
+    select(source, value), epitope_attributes |> 
+    filter(Matched) |> 
+    unnest(matched_pathogens) |> 
+    mutate(source = "Pathogen Region", value = rsa_pathogen_peptide) |> 
+    select(source, value)
+)
+
+# Create boxplot
+p3 <- ggplot(df_p3, aes(x = source, y = value, fill = source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.8, color = "black") +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_manual(values = c(
+    "Unmatched Epitope" = "steelblue",
+    "Matched Epitope" = "seagreen",
+    "Pathogen Region" = "darkorange"
+  )) +
+  labs(x = NULL, y = "Mean RSA", fill = NULL) +
+  my_theme +
+  theme(legend.position = "none") +
+  theme(
+  axis.title.x = element_text(size = 8),
+  axis.title.y = element_text(size = 8)
+)
+
+
+
+# p5: Number of matched pathogen proteins per epitope
+p4 <- epitope_attributes |>
+  group_by(Assay_ID) |>
+  summarise(n_matches = unique(n_matches)) |>
+  ggplot(aes(x = n_matches)) +
+  geom_histogram(binwidth = 3, fill = "purple", color = "white") +
+  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000), labels = c("0", "1", "10", "100", "1000")) +
+  labs(x = "Number of Matching Pathogen Proteins", y = "Count") +
+  my_theme
+
+# p6: Number of matched pathogen species per epitope
+p5 <- epitope_attributes |>
+  group_by(Assay_ID) |>
+  summarise(n_species = unique(n_species)) |>
+  ggplot(aes(x = n_species)) +
+  geom_histogram(binwidth = 1, fill = "pink", color = "white") +
+  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000), labels = c("0", "1", "10", "100", "1000")) +
+  labs(x = "Number of Matching Pathogen Species", y = "Count") +
+  my_theme
+
+# p7: Distribution of epitope subcellular locations, grouped by match status
+p6 <- epitope_attributes |>
+  mutate(epitope_location = ifelse(is.na(epitope_location), "NA", epitope_location)) |>
+  ggplot(aes(x = fct_infreq(epitope_location), fill = as.factor(Matched))) +
+  geom_bar(position = "dodge", color = "white", alpha = 0.8) +
+  labs(x = "Epitope Source Subcellular Location (DeepLoc)", y = "Count of Proteins", fill = "Matched") +
+  my_theme
+
+# p8: Distribution of pathogen protein subcellular locations (matched only)
+p7 <- epitope_attributes |>
+  filter(Matched) |>
+  unnest(matched_pathogens) |>
+  distinct(Pathogen_Protein_ID, pathogen_location) |>
+  mutate(pathogen_location = ifelse(is.na(pathogen_location), "NA", pathogen_location)) |>
+  ggplot(aes(x = fct_infreq(pathogen_location))) +
+  geom_bar(fill = "darkseagreen3", color = "white") +
+  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000), labels = c("0", "1", "10", "100", "1000")) +
+  labs(x = "Pathogen Protein Subcellular Location (DeepLoc)", y = "Frequency of Proteins (log 10)") +
+  my_theme
+
+# p9: Epitope count per disease, grouped by match status
+p8 <- epitope_attributes |>
+  mutate(Disease = ifelse(is.na(Disease), "NA", Disease)) |>
+  count(Disease, Matched) |>
+  complete(Disease, Matched, fill = list(n = 0)) |>
+  mutate(
+    Disease = factor(Disease, levels = count(epitope_attributes, Disease, sort = TRUE)$Disease)
+  ) |>
+  ggplot(aes(x = Disease, y = n, fill = as.factor(Matched))) +
+  geom_bar(stat = "identity", position = "dodge", color = "white", alpha = 0.8) +
+  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100),
+                     labels = c("0", "1", "10", "100"), limits = c(0, 100)) +
+  labs(x = "Disease", y = "Number of Epitopes", fill = "Matched") +
+  my_theme
+
+p_rsa_compare <- epitope_attributes |>
+  filter(Matched) |>
+  unnest(matched_pathogens) |>
+  ggplot(aes(x = rsa_epitope, y = rsa_pathogen_peptide)) +
+  geom_hex(bins = 50) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray40") +
+  scale_fill_viridis_c(name = "Count") +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(
+    x = "RSA of Autoimmune Epitope",
+    y = "RSA of Matched Pathogen Region"
+  ) +
+  my_theme
+
+
+p1_2_3 <- (p1+p2) / p3 + plot_layout(heights = c(1, 1))
+
+ggsave("../final plots/plot_rsa_epitope_peptide.png", p1_2_3, width = 7, height = 4, dpi = 300)
+ggsave("../final plots/plot_rsa_compare.png", p_rsa_compare, width = 7, height = 4, dpi = 300)
+ggsave("../final plots/plot_n_matches.png", p4, width = 7, height = 4, dpi = 300)
+ggsave("../final plots/plot_n_species.png", p5, width = 7, height = 4, dpi = 300)
+ggsave("../final plots/plot_epitope_location.png", p6, width = 7, height = 4, dpi = 300)
+ggsave("../final plots/plot_pathogen_location.png", p7, width = 7, height = 4, dpi = 300)
+ggsave("../final plots/plot_epitope_disease.png", p8, width = 7, height = 4, dpi = 300)
+
+p1_2_3
+p_rsa_compare
+p4
+p5
+p6
+p7
+p8
+```
+
+### Epitope attribute analysis
+
+```{r}
+plot_location <- epitope_attributes |>
+  select(Assay_ID, n_matches, n_species, matched_pathogens) |>
+  unnest(matched_pathogens) |>
+  filter(!is.na(pathogen_location)) |>
+  group_by(Assay_ID, pathogen_location) |>
+  summarise(
+    n_matches = unique(n_matches),
+    n_species = unique(n_species),
+    count = n(),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = n_species, y = n_matches, color = pathogen_location, size = count)) +
+  geom_point(alpha = 0.5) +
+  scale_x_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000)) +
+  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000)) +
+  scale_size_continuous(
+    range = c(1, 6),
+    name = "No. of Matches\nin Group",
+    breaks = c(1, 10, 100, 500, 800),
+    labels = c("1", "10", "100", "500", "800")
+  ) +
+  labs(
+    x = "Number of Matching Pathogen Species (log10 scale)",
+    y = "Number of Matches (log10 scale)",
+    color = "Pathogen Protein Location"
+  ) +
+  my_theme
+
+ggsave("../final plots/pathogen_location_vs_match_count.png", plot_location, width = 7, height = 5, dpi = 300)
+
+
+plot_rsa <- epitope_attributes |>
+  select(Assay_ID, rsa_epitope, n_matches, n_species, matched_pathogens) |>
+  unnest(matched_pathogens) |>
+  filter(n_matches > 0) |>
+  filter(n_matches > 0, !is.na(rsa_pathogen_peptide), !is.na(rsa_epitope)) |>
+  mutate(
+    rsa_difference = rsa_pathogen_peptide - rsa_epitope,
+    rsa_diff_category = case_when(
+      rsa_difference <= -0.2 ~ "Much Lower (≤ -0.2)",
+      rsa_difference > -0.2 & rsa_difference < -0.05 ~ "Slightly Lower (-0.2 to -0.05)",
+      rsa_difference >= -0.05 & rsa_difference <= 0.05 ~ "Little Difference (-0.05 to 0.05)",
+      rsa_difference > 0.05 & rsa_difference < 0.2 ~ "Slightly Higher (0.05 to 0.2)",
+      rsa_difference >= 0.2 ~ "Much Higher (≥ 0.2)"
+    ),
+    rsa_diff_category = factor(
+      rsa_diff_category,
+      levels = c(
+        "Much Lower (≤ -0.2)",
+        "Slightly Lower (-0.2 to -0.05)",
+        "Little Difference (-0.05 to 0.05)",
+        "Slightly Higher (0.05 to 0.2)",
+        "Much Higher (≥ 0.2)"
+      )
+    )
+  ) |>
+  group_by(Assay_ID, rsa_diff_category) |>
+  summarise(
+    n_matches = unique(n_matches),
+    n_species = unique(n_species),
+    count = n(),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = n_species, y = n_matches, size = count, color = rsa_diff_category)) +
+  geom_jitter(width = 0.2, height = 0.2, alpha = 0.85) +
+  scale_x_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000)) +
+  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000)) +
+  scale_color_manual(
+    values = c(
+      "Much Lower (≤ -0.2)" = "#D73027",
+      "Slightly Lower (-0.2 to -0.05)" = "#FC8D59",
+      "Little Difference (-0.05 to 0.05)" = "#999999",
+      "Slightly Higher (0.05 to 0.2)" = "#91BFDB",
+      "Much Higher (≥ 0.2)" = "#4575B4"
+    ),
+    name = "RSA Difference\n(Pathogen - Epitope)"
+  ) +
+  scale_size_continuous(
+    range = c(1, 6),
+    name = "No. of Matches\nin Group",
+    breaks = c(1, 10, 100, 300, 600),
+    labels = c("1", "10", "100", "300", "600")
+  ) +
+  facet_wrap(~ rsa_diff_category, nrow = 1) +
+  labs(
+    x = "Number of Matching Pathogen Species",
+    y = "Number of Matches"
+  ) +
+  my_theme +
+  theme(strip.text = element_blank())
+
+
+ggsave("../final plots/rsa_comparison_vs_match_count.png", plot_rsa, width = 7, height = 5, dpi = 300)
+
+epitope_attributes |>
+  select(Assay_ID, rsa_epitope, n_matches, n_species, matched_pathogens) |>
+  unnest(matched_pathogens) |>
+  filter(n_matches > 0, !is.na(pathogen_location)) |>
+  unnest(rsa_pathogen_peptide) |>
+  mutate(
+    pathogen_rsa_higher = rsa_pathogen_peptide > rsa_epitope,
+    non_cytoplasmic = pathogen_location != "Cytoplasmic",
+    immunogenic_condition = pathogen_rsa_higher & non_cytoplasmic
+  ) |>
+  group_by(Assay_ID, immunogenic_condition) |>
+  summarise(
+    n_matches = unique(n_matches),
+    n_species = unique(n_species),
+    count = n(),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = n_species, y = n_matches, color = immunogenic_condition, size = count)) +
+  geom_jitter(width = 0.2, height = 0.2, alpha = 0.6) +
+  scale_x_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000)) +
+  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000)) +
+  scale_color_manual(
+    values = c("TRUE" = "red", "FALSE" = "blue"),
+    labels = c("TRUE" = "Non-cytoplasmic & RSA↑", "FALSE" = "Other"),
+    name = "Match Category"
+  ) +
+  scale_size_continuous(
+    range = c(1, 6),
+    name = "No. of Matches",
+    breaks = c(1, 10, 100, 500, 800),
+    labels = c("1", "10", "100", "500", "800")
+  ) +
+  labs(
+    x = "Number of Matching Pathogen Species",
+    y = "Number of Matches"
+  ) +
+  my_theme
+
+plot_location
+plot_rsa
+```
+
+### Correlation analysis
+
+```{r}
+# Original data
+df_2d <- epitope_attributes |>
+  group_by(Assay_ID) |>
+  summarise(
+    n_matches = unique(n_matches),
+    n_species = unique(n_species)
+  )
+
+# 1D Histogram for match counts
+p_hist_all <- ggplot(df_2d, aes(x = n_matches)) +
+  geom_histogram(binwidth = 0.75, fill = "steelblue", color = "black") +
+  scale_x_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000)) +
+  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000)) +
+  labs(
+    x = "Number of Matched Pathogen Proteins (log10 scale)",
+    y = "Number of Epitopes (log10 scale)"
+  ) +
+  my_theme +
+  theme(
+    axis.title = element_text(size = 9),
+    axis.text = element_text(size = 8)
+  )
+
+p_hist_matched <- df_2d |>
+  filter(n_matches > 0) |>
+  ggplot(aes(x = n_matches)) +
+  geom_histogram(binwidth = 0.75, fill = "steelblue", color = "black") +
+  scale_x_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000)) +
+  labs(
+    x = "Number of Matched Pathogen Proteins (log10 scale)",
+    y = "Number of Epitopes"
+  ) +
+  my_theme +
+  theme(
+    axis.title = element_text(size = 9),
+    axis.text = element_text(size = 8)
+  )
+
+
+combined_hist <- p_hist_all + p_hist_matched +
+  plot_layout(ncol = 2, widths = c(1, 1)) +
+  plot_annotation(
+    tag_levels = 'A',
+    tag_prefix = "(",
+    tag_suffix = ")",
+    theme = theme(plot.tag = element_text(face = "bold"))
+  )
+
+
+
+# Plot A: Full data with tile outlines
+p_2dhist_matches <- ggplot(df_2d, aes(x = n_matches, y = n_species)) +
+  stat_bin_2d(geom = "tile", bins = 30, color = "white", size = 0.1) +
+  scale_fill_viridis_c(
+    trans = "log1p",
+    breaks = c(1, 4, 20, 1000),         # set exact values you want to emphasize
+    labels = c("1", "4", "20", "1000"),
+    name = "Count"
+  ) +
+  scale_x_continuous(trans = "log1p", breaks = c(0,1,10,100,1000)) +
+  scale_y_continuous(trans = "log1p", breaks = c(0,1,10,100,1000)) +
+  labs(x = "pathogen proteins matches (log 10)", y = "Species diversity (log 10)") +
+  my_theme
+
+combined_hist
+p_2dhist_matches
+
+ggsave("../final plots/match_species_2dhist.png", p_2dhist_matches, width = 7, height = 4, dpi = 300)
+
+ggsave("../final plots/match_species_1dhist.png", combined_hist, width = 7, height = 4, dpi = 300)
+
+perfect_match |>
+  group_by(Assay_ID) |>
+  summarise(n = n(),
+            n_org = n_distinct(Organism_Source)) |>
+  arrange(desc(n))
+```
+
+### Epitope distribution plots:
+
+```{r}
+#,, Summary: Epitope Source
+epitope_summary <- IEDB_data |>
+  group_by(Epitope_Source) |>
+  summarise(
+    n_ep_source = n(),
+    n_assay = n_distinct(Assay_ID),
+    disease = dplyr::first(Disease),
+    .groups = "drop"
+  ) |>
+  mutate(Epitope_Disease = paste0(Epitope_Source, "\n(", disease, ")")) |>
+  drop_na() |>
+  arrange(desc(n_ep_source))
+
+top20_ep <- slice_max(epitope_summary, n_ep_source, n = 20)
+
+#,, Reusable plotting function
+plot_bar <- function(data, x_var, y_var, fill_var = NULL,
+                     x_lab = NULL, y_lab = NULL,
+                     show_y_labels = TRUE, use_log = FALSE, fill_scale = NULL) {
+
+  p <- ggplot(data, aes(x = reorder({{x_var}}, {{y_var}}), y = {{y_var}}))
+
+  if (!rlang::quo_is_null(rlang::enquo(fill_var))) {
+    p <- p + geom_bar(stat = "identity", aes(fill = {{fill_var}}))
+  } else {
+    p <- p + geom_bar(stat = "identity")
+  }
+
+  if (use_log) {
+    p <- p + scale_y_continuous(trans = "log1p",
+                                breaks = c(0, 1, 10, 100, 1000),
+                                labels = c("0", "1", "10", "100", "1000"))
+  }
+
+  if (!is.null(fill_scale)) {
+    p <- p + fill_scale
+  }
+
+  p +
+    coord_flip() +
+    labs(x = x_lab, y = y_lab) +
+    theme_minimal() +
+    theme(
+      panel.grid = element_blank(),
+      axis.line = element_line(color = "black"),
+      axis.text.y = if (show_y_labels) element_text() else element_blank(),
+      axis.ticks.y = if (show_y_labels) element_line() else element_blank(),
+      axis.text.x = element_text(angle = if (use_log) 45 else 0, hjust = 1)
+    )
+}
+
+#,, Epitope Source Plots
+p_all_ep <- plot_bar(epitope_summary, Epitope_Source, n_ep_source,
+                     x_lab = NULL, y_lab = "Number of epitopes", show_y_labels = FALSE)
+
+p_top20_ep <- plot_bar(top20_ep, Epitope_Source, n_ep_source,
+                       x_lab = "Epitope Source Protein", y_lab = "Number of epitopes")
+
+ggsave("../final plots/epitope_source_distribution.png", p_top20_ep + p_all_ep + patchwork::plot_layout(ncol = 2), width = 16, height = 7, dpi = 300)
+
+#,, Perfect Match Summary
+perfect_match_summary <- perfect_match |>
+  filter(!is.na(Matched_9mer)) |>
+  group_by(Epitope_Source) |>
+  summarise(n_matches = n(), .groups = "drop") |>
+  left_join(epitope_summary |> select(Epitope_Source, n_ep_source), by = "Epitope_Source") |>
+  drop_na() |>
+  arrange(desc(n_matches))
+
+p_all_matches <- plot_bar(perfect_match_summary, Epitope_Source, n_matches,
+                          fill_var = n_ep_source,
+                          x_lab = "Epitope Source Protein",
+                          y_lab = "Frequency of Epitope source protein",
+                          use_log = TRUE,
+                          fill_scale = scale_fill_viridis_c(option = "D", name = "Epitopes\nin IEDB"))
+
+ggsave("../final plots/perfect_match_epitope_sources.png", p_all_matches, width = 14, height = 7, dpi = 300)
+
+#,, Assay Match Frequency
+assay_summary <- perfect_match |>
+  filter(!is.na(Matched_9mer)) |>
+  count(Assay_ID, Epitope_Source, Disease, name = "n_matches") |>
+  group_by(Epitope_Source, Disease) |>
+  mutate(total_matches = sum(n_matches)) |>
+  ungroup() |>
+  mutate(Epitope_Disease = paste0(Epitope_Source, " (", Disease, ")")) |>
+  mutate(Epitope_Disease = fct_reorder(Epitope_Disease, total_matches, .desc = TRUE))
+
+p_all_assays <- ggplot(assay_summary, aes(x = n_matches, y = reorder(Assay_ID, n_matches), fill = Epitope_Source)) +
+  geom_col() +
+  facet_grid(Epitope_Disease ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_discrete(guide = "none") +
+  scale_x_continuous(trans = "log1p",
+                     breaks = c(0, 1, 10, 100, 1000),
+                     labels = c("0", "1", "10", "100", "1000")) +
+  labs(x = "Number of Matches (log)", y = "Epitopes") +
+  theme_minimal() +
+  theme(
+    strip.text.y = element_text(angle = 0, size = 9),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.spacing = unit(0.2, "lines"),
+    panel.grid = element_blank(),
+    axis.line.x = element_line(color = "black"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5)
+  )
+
+
+ggsave("../final plots/perfect_match_all_assays.png", p_all_assays, width = 10, height = 10, dpi = 300)
+
+assay_species_summary <- perfect_match |>
+  filter(!is.na(Matched_9mer)) |>
+  distinct(Assay_ID, Disease, Epitope_Source, Organism_Source) |>
+  count(Assay_ID, Epitope_Source, Disease, name = "n_species") |>
+  group_by(Epitope_Source, Disease) |>
+  mutate(total_species = sum(n_species)) |>
+  ungroup() |>
+  mutate(Epitope_Disease = paste0(Epitope_Source, " (", Disease, ")")) |>
+  mutate(Epitope_Disease = fct_reorder(Epitope_Disease, total_species, .desc = TRUE))
+
+p_species_per_epitope <- ggplot(assay_species_summary, aes(x = n_species, y = reorder(Assay_ID, n_species), fill = Epitope_Source)) +
+  geom_col() +
+  facet_grid(Epitope_Disease ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_discrete(guide = "none") +
+  scale_x_continuous(trans = "log1p",
+                     breaks = c(0, 1, 10, 100, 1000),
+                     labels = c("0", "1", "10", "100", "1000")) +
+  labs(x = "Number of Matched Species (log)", y = "Epitopes") +
+  theme_minimal() +
+  theme(
+    strip.text.y = element_text(angle = 0, size = 9),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.spacing = unit(0.2, "lines"),
+    panel.grid = element_blank(),
+    axis.line.x = element_line(color = "black"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5)
+  )
+
+
+ggsave("../final plots/perfect_match_species_diversity.png", p_species_per_epitope, width = 10, height = 10, dpi = 300)
+
+
+#,, Disease summary from IEDB
+disease_summary_IEDB <- IEDB_data |>
+  filter(!is.na(Disease)) |>
+  count(Disease, name = "n_epitopes") |>
+  arrange(desc(n_epitopes))
+
+#,, Plot: Disease distribution
+p_all_diseases_horizontal <- ggplot(disease_summary_IEDB,
+                                         aes(x = reorder(Disease, -n_epitopes),
+                                             y = n_epitopes)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    x = "Autoimmune Disease",
+    y = "Number of Epitopes"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 12),
+    axis.text.y = element_text(),
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+#,, NEW: Disease Distribution Plot
+disease_summary <- disease_summary_IEDB |>
+  left_join(
+    perfect_match |>
+      filter(!is.na(Matched_9mer)) |>
+      count(Disease, name = "n_matches"),
+    by = "Disease"
+  ) |>
+  mutate(n_matches = replace_na(n_matches, 0))
+
+
+p_diseases <- ggplot(disease_summary, aes(x = reorder(Disease, n_matches), y = n_matches, fill = n_epitopes)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis_c(option = "D", name = "Epitopes in IEDB") +
+  scale_y_continuous(trans = "log1p",
+                     breaks = c(0, 1, 10, 100, 1000),
+                     labels = c("0", "1", "10", "100", "1000")) +
+  labs(
+    x = "Autoimmune Disease",
+    y = "Number of Matches (log10)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 12),
+    axis.text.y = element_text(),
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+
+ggsave("../final plots/iedb_disease_distribution.png", p_all_diseases_horizontal, width = 16, height = 7, dpi = 300)
+
+
+ggsave("../final plots/perfect_match_disease_distribution.png", p_diseases, width = 12, height = 8, dpi = 300)
+
+p_species_per_epitope
+p_diseases
+p_all_diseases_horizontal
+p_all_assays
+
+# Top 15 Epitope Sources
+p_top15 <- epitope_summary |>
+  slice_max(n_ep_source, n = 15) |>
+  ggplot(aes(x = reorder(Epitope_Disease, n_ep_source), y = n_ep_source)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    x = "Epitope Source",
+    y = "Number of Epitopes"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+# Histogram of Epitope Source Frequencies
+p_hist <- ggplot(epitope_summary, aes(x = n_ep_source)) +
+  geom_histogram(binwidth = 5, fill = "steelblue", color = "black") +
+  labs(
+    x = "Number of Epitopes per Source",
+    y = "Number of Sources"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+combined_plot <- p_top15 + p_hist + 
+  plot_layout(ncol = 2) + 
+  plot_annotation(
+    tag_levels = 'A',
+    tag_prefix = "(",
+    tag_suffix = ")",
+    theme = theme(plot.tag = element_text(face = "bold"))
+  )
+
+combined_plot
+```
+
+### Pathogen AA distribution:
+
+```{r}
+# Summarize AA length and strain counts
+species_aa_summary <- pathogen_data |>
+  group_by(Organism_Source) |>
+  summarise(
+    AA_len = sum(protein_len),
+    n_strains = n_distinct(Strain),
+    .groups = "drop"
+  ) |>
+  arrange(desc(AA_len))
+
+organism_match_stats <- perfect_match |>
+  group_by(Organism_Source) |>
+  summarise(organism_count = n(), .groups = "drop") |>
+  left_join(species_aa_summary, by = "Organism_Source") |>
+  arrange(desc(organism_count)) |>
+  filter(!is.na(Organism_Source)) |>
+  mutate(norm_n_species = (organism_count/AA_len)* 1e5)
+
+# Plot with ALL species (no organism names shown)
+p_all <- ggplot(species_aa_summary, aes(x = AA_len)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+  scale_x_log10() +
+  labs(
+    x = "Total Amino Acids per Species (log10 scale)",
+    y = "Number of Species with given AA content"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+
+
+# Plot with TOP 20 species (names shown)
+p_top20 <- species_aa_summary |>
+  slice_max(AA_len, n = 15) |>
+  ggplot(aes(x = reorder(Organism_Source, AA_len), y = AA_len, fill = n_strains)) +
+  geom_bar(stat = "identity") +
+  scale_y_log10() +
+  scale_fill_viridis_c(option = "D") +
+  coord_flip() +
+  labs(
+    x = "Organism (Genus species)",
+    y = "Total Amino Acids (log10 scale)",
+    fill = "Number of Strains"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+# Combine and export
+combined_plot <- p_top20 + p_all + plot_layout(ncol = 2) +
+  plot_annotation(
+    tag_levels = 'A',
+    tag_prefix = "(",
+    tag_suffix = ")",
+    theme = theme(plot.tag = element_text(face = "bold"))
+  )
+
+
+ggsave("../final plots/aa_lengths_species_combined.png", combined_plot, width = 16, height = 7, dpi = 300)
+
+combined_plot
+
+p_top15_orgs <- organism_match_stats |>
+  slice_max(organism_count, n = 15) |>
+  ggplot(aes(x = reorder(Organism_Source, organism_count), 
+             y = organism_count, fill = AA_len)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis_c(option = "D") +
+  coord_flip() +
+  labs(
+    x = "Organism (Genus species)",
+    y = "Number of Matches",
+    fill = "Total AA's\nin Organism"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+p_hist_orgs <- ggplot(organism_match_stats, aes(x = organism_count)) +
+  geom_histogram(binwidth = 20, fill = "steelblue", color = "black") +
+  labs(
+    x = "Number of Matches per Organism",
+    y = "Number of Organisms"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+combined_org_plot <- p_top15_orgs + p_hist_orgs + 
+  plot_layout(ncol = 2) +
+  plot_annotation(
+    tag_levels = 'A',
+    tag_prefix = "(",
+    tag_suffix = ")",
+    theme = theme(plot.tag = element_text(face = "bold"))
+  )
+
+combined_org_plot
+
+ggsave("../final plots/species_distribution_matched.png", combined_org_plot, width = 16, height = 7, dpi = 300)
+```
+
+### Organism distribution plot:
+
+```{r}
+# Function to extract genus_species from first header line
+extract_genus_species_and_strain <- function(file) {
+  fasta <- readAAStringSet(file)
+  if (length(fasta) == 0) {
+    return(tibble(
+      Proteome_ID = basename(tools::file_path_sans_ext(file)),
+      Genus_Species = NA,
+      Strain = "unknown strain"
+    ))
+  }
+
+  header <- names(fasta)[1]
+
+  # Extract full OS field (up to OX)
+  full_os <- str_match(header, "OS=([^=]+?) OX=")[,2]
+  if (is.na(full_os)) {
+    return(tibble(
+      Proteome_ID = basename(tools::file_path_sans_ext(file)),
+      Genus_Species = NA,
+      Strain = "unknown strain"
+    ))
+  }
+
+  words <- str_split(full_os, "\\s+")[[1]]
+  genus_species <- str_c(words[1:2], collapse = " ")
+  strain <- if (length(words) > 2) {
+    str_c(words[3:length(words)], collapse = " ")
+  } else {
+    "unknown strain"
+  }
+
+  return(tibble(
+    Proteome_ID = basename(tools::file_path_sans_ext(file)),
+    Genus_Species = genus_species,
+    Strain = strain
+  ))
+}
+
+
+# Apply function to all FASTA files
+Original_organism_df <- map_dfr(fasta_files, extract_genus_species_and_strain)
+
+
+# Prepare data
+organism_counts <- Original_organism_df |>
+  group_by(Genus_Species) |>
+  summarise(n_organism = n()) |>
+  arrange(desc(n_organism))
+
+top20 <- organism_counts |> slice_max(n_organism, n = 15)
+all_orgs <- organism_counts |> filter(!is.na(Genus_Species))
+
+# Top 20 plot
+p1 <- ggplot(top20, aes(x = reorder(Genus_Species, n_organism), y = n_organism)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(
+    x = "Organism (Genus species)",
+    y = "Number of Strains per species"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.line.y = element_line(),
+    axis.line.x = element_line(),
+    panel.border = element_blank()
+  )
+
+# All organisms plot (no Genus_Species labels)
+# All organisms plot as histogram
+p2 <- ggplot(all_orgs, aes(x = n_organism)) +
+  geom_histogram(binwidth = 2, fill = "steelblue", color = "black") +
+  labs(
+    x = "Number of Strains per Species",
+    y = "Frequency (Number of Species)"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.border = element_blank()
+  )
+
+# Combine plots side by side
+combined_plot <- p1 + p2 +
+  plot_layout(ncol = 2) +
+  plot_annotation(
+    tag_levels = 'A',
+    tag_prefix = "(",  # Add opening parenthesis
+    tag_suffix = ")"   # Add closing parenthesis
+  )
+
+combined_plot
+
+# Save output
+ggsave("../final plots/organism_distribution_combined.png", combined_plot, width = 14, height = 6, dpi = 300)
+```
+
+### Matched Pathogen analysis:
+
+```{r}
+
+organism_match_stats |>
+  arrange(desc(norm_n_species)) |>
+  head(20) |>
+  ggplot(aes(x = reorder(Organism_Source, norm_n_species), 
+             y = norm_n_species, fill = AA_len)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis_c(option = "D") +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Organism Occurrence Normalized",
+    fill = "Total AA's\nin Organism"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+organism_match_stats |>
+  arrange(desc(norm_n_species)) |>
+  ggplot(aes(x = reorder(Organism_Source, norm_n_species), 
+             y = norm_n_species, fill = AA_len)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis_c(option = "D") +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Organism Occurrence Normalized",
+    fill = "Total AA's\nin Organism"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+pathogen_attributes <- perfect_match_with_rsa |>
+  filter(Matched) |>
+  group_by(Organism_Source) |>
+  summarise(epitope_sources = list(unique(Epitope_Source)),
+            diseases = list(unique(Disease)))
+
+organism_match_stats |>
+  left_join(pathogen_attributes, by = "Organism_Source") |>
+  arrange(desc(norm_n_species)) |>
+  mutate(Organism_Source = fct_inorder(Organism_Source)) |>  # preserve order
+  rowwise() |>
+  filter(!all(diseases %in% c("rheumatoid arthritis",
+                              "type 1 diabetes mellitus"))) |>
+  ungroup() |>
+  unnest_longer(diseases) |>
+  mutate(present = 1) |>
+  ggplot(aes(x = diseases, y = Organism_Source, fill = as.factor(present))) +
+  geom_tile(color = "white") +
+  scale_fill_manual(values = c("1" = "steelblue"), guide = "none") +
+  labs(
+    x = "Associated Disease",
+    y = "Pathogens",
+    title = "Disease Presence per Top Pathogen"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r}
+# ------------------------
+# 1. Disease-level matrix
+# ------------------------
+
+species_disease_raw <- perfect_match |>
+  filter(
+    !is.na(Matched_9mer),
+    !is.na(Disease),
+    !is.na(Organism_Source),
+    !IEDB_Protein_ID %in% c("P0DMV9", "P10809", "P11021", "P06733", "P38646")
+  ) |>
+  count(Organism_Source, Disease, name = "n_matches")
+
+species_disease_joined <- species_disease_raw |>
+  left_join(disease_summary_IEDB, by = "Disease") |>
+  left_join(organism_match_stats |> select(Organism_Source, AA_len), by = "Organism_Source") |>
+  filter(!is.na(n_epitopes), !is.na(AA_len)) |>
+  mutate(
+    score_scaled = (n_matches / (AA_len)) * 1e6,
+    Genus = word(Organism_Source, 1),
+    Species = str_replace(Organism_Source, "^[^ ]+ ", ""),
+    Species = fct_rev(Species)
+  )
+
+p_disease_facet <- ggplot(species_disease_joined, aes(x = Disease, y = Species, fill = n_matches)) +
+  geom_tile(color = "grey80", linewidth = 0.4) +
+  scale_fill_viridis_c(name = "Number of Matches", option = "D") +
+  facet_grid(Genus ~ ., scales = "free_y", space = "free") +
+  labs(x = "Autoimmune Disease", y = NULL) +  # Remove y-axis label
+  theme_light(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 10),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_blank(),
+    strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"),
+    panel.spacing = unit(0.3, "lines"),
+    panel.grid.major.x = element_line(color = "black"),
+    panel.grid.major.y = element_line(color = "grey90"),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8)
+  )
+
+
+
+# -----------------------------
+# 2. Epitope Source-level matrix
+# -----------------------------
+
+species_epitope_raw <- perfect_match |>
+  filter(
+    !is.na(Matched_9mer),
+    !is.na(Epitope_Source),
+    !is.na(Organism_Source),
+    !IEDB_Protein_ID %in% c("P0DMV9", "P10809", "P11021", "P06733", "P38646")
+  ) |>
+  count(Organism_Source, Epitope_Source, name = "n_matches")
+
+epitope_summary_slim <- epitope_summary |> select(Epitope_Source, n_ep_source)
+
+species_epitope_joined <- species_epitope_raw |>
+  left_join(epitope_summary_slim, by = "Epitope_Source") |>
+  left_join(organism_match_stats |> select(Organism_Source, AA_len), by = "Organism_Source") |>
+  filter(!is.na(n_ep_source), !is.na(AA_len)) |>
+  mutate(
+    score_scaled = (n_matches / (n_ep_source * AA_len)) * 1e6,
+    Genus = word(Organism_Source, 1),
+    Species = str_replace(Organism_Source, "^[^ ]+ ", ""),
+    Species = fct_rev(Species)
+  )
+
+p_epitope_facet <- ggplot(species_epitope_joined, aes(x = Epitope_Source, y = Species, fill = n_matches)) +
+  geom_tile(color = "grey80", linewidth = 0.4) +
+  scale_fill_viridis_c(name = "Number of Matches", option = "D") +
+  facet_grid(Genus ~ ., scales = "free_y", space = "free") +
+  labs(x = "Epitope Source", y = NULL) +  # Remove y-axis label
+  theme_light(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 10),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_blank(),
+    strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"),
+    panel.spacing = unit(0.3, "lines"),
+    panel.grid.major.x = element_line(color = "black"),
+    panel.grid.major.y = element_line(color = "grey90"),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8)
+  )
+
+
+
+# To view the plots
+p_disease_facet
+p_epitope_facet
+
+ggsave("../final plots/facet_heatmap_disease.png", p_disease_facet, width = 16, height = 10, dpi = 300)
+
+ggsave("../final plots/facet_heatmap_source.png", p_epitope_facet, width = 16, height = 10, dpi = 300)
+```
+
+### Subcellular location heatmap:
+
+```{r}
+# 1. Prepare binary match matrix without RSA
+match_matrix <- perfect_match_with_rsa |>
+  filter(
+    !is.na(Matched_9mer),
+    !is.na(Assay_ID),
+    !is.na(Pathogen_Protein_ID),
+    !is.na(pathogen_deeploc_subcellular_location),
+    !IEDB_Protein_ID %in% c("P0DMV9", "P10809", "P11021", "P06733", "P38646")
+  ) |>
+  group_by(Epitope_Source, Pathogen_Protein_ID, pathogen_deeploc_subcellular_location) |>
+  summarise(n_matches = n(), .groups = "drop") |>
+  mutate(
+    matches = n()
+  )
+
+# Plot
+p_assay_epitope_labeled <- ggplot(match_matrix, aes(x = Epitope_Source, y = Pathogen_Protein_ID, fill = n_matches)) +
+  geom_tile(color = "white", linewidth = 0.15) +
+  scale_fill_viridis_c(
+    name = "Number of Matches",
+    option = "D"
+  ) +
+  facet_grid(pathogen_deeploc_subcellular_location ~ ., scales = "free_y", space = "fixed") +
+  labs(
+    x = "Epitope Source",
+    y = "Pathogen Protein"
+  ) +
+  theme_light(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 10),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"),
+    panel.spacing = unit(0.3, "lines"),
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6)
+  )
+
+p_assay_epitope_labeled
+
+ggsave("../final plots/facet_heatmap_location.png", p_assay_epitope_labeled, width = 16, height = 10, dpi = 300)
+
+```
+
+### Saving epitope attributes:
+
+```{r}
+saveRDS(epitope_attributes, "../Data/epitope_attributes.rds")
+```
+
+### Most relevant results
+
+```{r}
+filtered_data <- perfect_match_with_rsa |>
+  filter(
+    !IEDB_Protein_ID %in% c("P0DMV9", "P10809", "P11021", "P06733", "P38646"),
+    Matched,
+    pathogen_deeploc_subcellular_location != "Cytoplasmic",
+    (rsa_pathogen_peptide - rsa_epitope) >= 0
+  ) |>
+  left_join(organism_match_stats |> select(Organism_Source, norm_n_species), by = "Organism_Source") |>
+  arrange(desc(norm_n_species)) |>
+  select(Disease, Epitope_Source, Assay_ID, Organism_Source, Pathogen_Gene_Name, pathogen_deeploc_subcellular_location, rsa_pathogen_protein, norm_n_species)
+
+filtered_data |> 
+  ggplot(aes(x = Epitope_Source, y = Organism_Source, fill = pathogen_deeploc_subcellular_location)) +
+  geom_tile(color = "white") +
+  scale_fill_brewer(palette = "Set2", name = "Subcellular Location") +
+  labs(
+    title = "Most Likely Cross-Reactivity Cases",
+    x = "Epitope Source",
+    y = "Pathogen Species"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+    axis.text.y = element_text(size = 7)
+  )
+
+filtered_data |> 
+  distinct(Organism_Source, norm_n_species) |> 
+  ggplot(aes(x = reorder(Organism_Source, norm_n_species), y = norm_n_species)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Top Pathogens by Normalized Match Enrichment",
+    x = "Pathogen Species",
+    y = "Normalized Match Enrichment"
+  ) +
+  theme_minimal()
+
+filtered_data |>
+  distinct(Disease, Organism_Source, Epitope_Source) |>
+  ggplot(aes(x = Epitope_Source, y = Organism_Source)) +
+  geom_tile(fill = "black") +
+  facet_wrap(~ Disease, scales = "free", ncol = 3) +
+  labs(
+    title = "High-Likelihood Pathogen–Epitope Matches by Disease",
+    x = "Epitope Source",
+    y = "Pathogen Species"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 55, hjust = 1, size = 6),
+    axis.text.y = element_text(size = 6),
+    strip.text = element_text(face = "bold")
+  )
+
+```
+
+```{r}
+# Step 1: Filter for matched proteins and remove unwanted proteins
+filtered_data <- perfect_match_with_rsa |>
+  filter(
+    Matched,
+    !IEDB_Protein_ID %in% c("P0DMV9", "P10809", "P11021", "P06733", "P38646")
+  ) |>
+  mutate(
+    Autoimmune_Class = case_when(
+      Disease %in% c("Graves' disease, Graves disease", "type 1 diabetes mellitus", "myasthenia gravis", "neuromyelitis optica", "pemphigoid gestationis", "primary biliary cholangitis", "psoriasis") ~ "Organ-specific",
+      Disease %in% c("autoimmune thrombocytopenic purpura", "multiple sclerosis", "rheumatoid arthritis") ~ "Systemic",
+      TRUE ~ "Unknown"
+    )
+  )
+
+# Build the summary table with lists, no pathogen proteome size
+summary_table <- filtered_data |>
+  filter(
+    pathogen_deeploc_subcellular_location != "Cytoplasmic"
+  ) |>
+  group_by(Disease, Autoimmune_Class, Epitope_Source) |>
+  summarise(
+    Pathogen_Species = paste(unique(Organism_Source), collapse = "; "),
+    Pathogen_Locations = paste(unique(pathogen_deeploc_subcellular_location), collapse = "; "),
+    .groups = "drop"
+  )
+
+# Create the polished table
+library(gt)
+table_gt <- summary_table |>
+  gt() |>
+  tab_header(
+    title = "Top Candidate Pathogen Matches for Autoimmune Epitopes"
+  ) |>
+  cols_label(
+    Disease = "Autoimmune Disease",
+    Autoimmune_Class = "Autoimmune Class",
+    Epitope_Source = "Epitope Source",
+    Pathogen_Species = "Pathogen Species",
+    Pathogen_Locations = "Pathogen Protein Locations"
+  ) |>
+  cols_align(align = "center") |>
+  opt_table_font(font = list(
+    google_font("Roboto"),
+    default_fonts()
+  ))
+
+# Display table
+table_gt
+
+# Save the table
+gtsave(table_gt, "../final plots/Top_Candidate_Pathogen_Matches.png")
+
+```
+
+```{r}
+perfect_match |>
+  filter(Disease == "rheumatoid arthritis",
+         Epitope_Source == "Endoplasmic reticulum chaperone BiP") |>
+  group_by(Pathogen_Gene_Name, Organism_Source) |>
+  summarise(N = n()) |>
+  arrange(desc(N))
+```
