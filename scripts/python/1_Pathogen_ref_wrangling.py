@@ -1,11 +1,14 @@
+print("Starting script...")   
 import pandas as pd
 import numpy as np
-from helpers import load_tsv, save_csv, DATA_DIR
-    
+from helpers import load_tsv, save_csv, load_tsv_robust, DATA_DIR
+
 # Pathogen reference data
-pathogen_ref = load_tsv(DATA_DIR / "raw/isolates.tsv")
+print("Loading isolates...")
+pathogen_ref = load_tsv_robust(DATA_DIR / "raw/isolates.tsv")
 
 # Proteome data
+print("Loading Uniprot proteomes...")
 referenced_proteome = load_tsv(DATA_DIR / "raw/Uniprot_raw_refferenced_bacterial_proteomes.tsv")
 other_proteome = load_tsv(DATA_DIR / "raw/Uniprot_raw_unrefferenced_bacterial_proteomes.tsv")
 

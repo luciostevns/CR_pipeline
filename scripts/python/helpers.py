@@ -46,8 +46,6 @@ def load_csv(path, **kwargs):
         path,
         sep=",",
         dtype=str,
-        engine="python",
-        on_bad_lines="warn",
         **kwargs
     )
 
@@ -61,9 +59,21 @@ def load_tsv(path, **kwargs):
         path,
         sep="\t",
         dtype=str,
-        engine="python",
-        on_bad_lines="warn",
-        quoting=3,
+        **kwargs
+    )
+
+def load_tsv_robust(path, **kwargs):
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"{path} does not exist")
+
+    return pd.read_csv(
+        path,
+        sep="\t",
+        dtype=str,
+        engine="python",       # slower but tolerant
+        on_bad_lines="skip",   # skip broken rows
+        quoting=3,             # ignore quotes entirely
         **kwargs
     )
 
@@ -71,13 +81,3 @@ def save_csv(df, path, **kwargs):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, **kwargs)
-
-
-# Validate if the correct cols are included
-def require_columns(df, required_cols, df_name="DataFrame"):
-    missing = [col for col in required_cols if col not in df.columns]
-    if missing:
-        raise ValueError(
-            f"{df_name} is missing required columns: {missing}\n"
-            f"Available columns: {list(df.columns)}"
-        )
