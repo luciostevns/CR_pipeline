@@ -16,7 +16,7 @@ Thumbs.db
 # Data (adjust depending on what you want to share)
 data/raw/
 data/intermediate/
-data/processed/
+data/proccesed/
 
 # Results (optional)
 results/

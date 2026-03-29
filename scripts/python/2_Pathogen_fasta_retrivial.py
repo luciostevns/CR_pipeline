@@ -1,36 +1,44 @@
-#%%
-import os
 import requests
+import time
+from Bio import SeqIO
+from io import StringIO
+from tqdm import tqdm
+from helpers import load_csv, DATA_DIR
 
-# Input and output paths
-proteome_id_file = "../Data/proteome_ids.txt"
-output_dir = "../Data/proteome_fastas"
+proteome_ids = load_csv(DATA_DIR / "intermediate/proteome_ids.csv").iloc[:, 0].dropna().tolist()
 
-# Create output directory if it doesn't exist
-os.makedirs(output_dir, exist_ok=True)
+output_file = DATA_DIR / "raw/all_proteomes.fasta"
 
 base_url = "https://rest.uniprot.org/uniprotkb/stream"
 
-with open(proteome_id_file) as f:
-    for line in f:
-        proteome_id = line.strip()
-        if not proteome_id:
-            continue
+print(f"Downloading {len(proteome_ids)} proteomes...")
+
+with open(output_file, "w", encoding="utf-8") as out:
+
+    for proteome_id in tqdm(proteome_ids, desc="Downloading proteomes", unit="proteome"):
 
         params = {
             "format": "fasta",
             "query": f"(proteome:{proteome_id})"
         }
 
-        output_path = os.path.join(output_dir, f"{proteome_id}.fasta")
+        try:
+            response = requests.get(base_url, params=params, timeout=300)
 
-        response = requests.get(base_url, params=params, timeout=60)
+            if response.status_code != 200 or not response.text.strip():
+                print(f"\nFailed: {proteome_id}")
+                continue
 
-        if response.status_code == 200 and response.text.strip():
-            with open(output_path, "w") as out:
-                out.write(response.text)
-            print(f"Downloaded {proteome_id}")
-        else:
-            print(f"Failed to download {proteome_id} (status {response.status_code})")
+            fasta_io = StringIO(response.text)
 
-# %%
+            for record in SeqIO.parse(fasta_io, "fasta"):
+                record.description = f"{record.description} PROTEOME={proteome_id}"
+                SeqIO.write(record, out, "fasta")
+
+            time.sleep(0.5)
+
+        except Exception as e:
+            print(f"\nError with {proteome_id}: {e}")
+            continue
+
+print("Done")
