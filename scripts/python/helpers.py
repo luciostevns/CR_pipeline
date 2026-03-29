@@ -33,21 +33,39 @@ def load_excel(path, **kwargs):
         df = pd.read_excel(path, header=0, engine="calamine", **kwargs)
         df.columns = df.columns.str.strip()
         return df
+from pathlib import Path
+import pandas as pd
 
-# Import and export helper functions
-def load_csv(path, sep=",", **kwargs):
+
+def load_csv(path, **kwargs):
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"{path} does not exist")
-    return pd.read_csv(path, sep=sep, **kwargs)
+
+    return pd.read_csv(
+        path,
+        sep=",",
+        dtype=str,
+        engine="python",
+        on_bad_lines="warn",
+        **kwargs
+    )
 
 
 def load_tsv(path, **kwargs):
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"{path} does not exist")
-    return pd.read_csv(path, sep="\t", **kwargs)
- 
+
+    return pd.read_csv(
+        path,
+        sep="\t",
+        dtype=str,
+        engine="python",
+        on_bad_lines="warn",
+        quoting=3,
+        **kwargs
+    )
 
 def save_csv(df, path, **kwargs):
     path = Path(path)
