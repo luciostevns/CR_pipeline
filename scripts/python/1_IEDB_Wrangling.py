@@ -8,6 +8,7 @@ from helpers import load_excel, save_csv, DATA_DIR
 
 # Read the full IEDB dataset
 autoimmune_data = load_excel(DATA_DIR / "raw/IEDB_autoimmune_epitope_assays_raw.xlsx")
+print(f"Original dataset size: {len(autoimmune_data)}")
 
 # Rename columns
 autoimmune_data = autoimmune_data.rename(columns={
@@ -35,12 +36,14 @@ autoimmune_data["Protein_ID"] = autoimmune_data["Protein_ID"].str.extract(r"([^/
 autoimmune_data_wrangled = autoimmune_data[
     autoimmune_data["Epitope - Modified residues"].isna() &
     autoimmune_data["Sequence"].str.len().between(12, 25)
-]
+].copy()
+print(f"Dataset size after basic filtering: {len(autoimmune_data_wrangled)}")
 
-# Remove duplicate sequences (keep first occurrence)
+# Remove duplicate sequences with same protein ID (keep first occurrence)
 autoimmune_data_wrangled = autoimmune_data_wrangled.drop_duplicates(
-    subset="Sequence"
+    subset=["Protein_ID", "Sequence"]
 )
+print(f"Dataset size after removing duplicate seqs: {len(autoimmune_data_wrangled)}")
 
 # Select relevant columns
 autoimmune_data_wrangled = autoimmune_data_wrangled[
@@ -57,54 +60,33 @@ autoimmune_data_wrangled = autoimmune_data_wrangled[
     ]
 ]
 
-################ Nested proteins removal ######################################
+################ Nested epitope removal #######################################
 
-# Function to generate all possible 9-mers from a sequence
-def generate_9mers(seq):
-    if len(seq) < 9:
-        return []
-    return [seq[i:i+9] for i in range(len(seq) - 8)]
+grouped_results = []
 
-# Generate 9-mers for each sequence
-autoimmune_data_wrangled["Nine_mers"] = autoimmune_data_wrangled["Sequence"].apply(generate_9mers)
+for protein_id, group in autoimmune_data_wrangled.groupby("Protein_ID", sort=False):
+    group = group.copy()
+    seqs = group["Sequence"].tolist()
 
-# Expand dataframe: one row per 9-mer
-expanded_9mers = (
-    autoimmune_data_wrangled[["Sequence", "Nine_mers"]]
-    .explode("Nine_mers")
-    .dropna()
-)
+    is_nested = []
+    for seq in seqs:
+        nested = any(
+            (len(other) > len(seq)) and (seq in other)
+            for other in seqs
+        )
+        is_nested.append(nested)
 
-# Precompute for speed
-nine_mer_dict = defaultdict(list)
+    group["Is_nested"] = is_nested
+    group["Protein_ID"] = protein_id
+    grouped_results.append(group)
 
-for nine_mer, seq_len in zip(
-    expanded_9mers["Nine_mers"],
-    expanded_9mers["Sequence"].str.len()
-):
-    nine_mer_dict[nine_mer].append(seq_len)
+autoimmune_data_wrangled = pd.concat(grouped_results, ignore_index=True)
 
-# Identify nested sequences
-def is_nested(row):
-    seq_len = len(row["Sequence"])
-
-    for nine_mer in row["Nine_mers"]:
-        if nine_mer in nine_mer_dict:
-            for other_len in nine_mer_dict[nine_mer]:
-                if other_len > seq_len:
-                    return True
-
-    return False
-
-autoimmune_data_wrangled["Is_nested"] = autoimmune_data_wrangled.apply(
-    is_nested,
-    axis=1
-)
-
-# Keep only non-nested sequences
 filtered_sequences = autoimmune_data_wrangled[
     ~autoimmune_data_wrangled["Is_nested"]
-].drop(columns=["Nine_mers", "Is_nested"])
+].drop(columns=["Is_nested"])
 
+print(f"Dataset size after removing nested epitopes: {len(filtered_sequences)}")
 # Write output
+print(filtered_sequences.columns.tolist())
 save_csv(filtered_sequences, DATA_DIR / "intermediate/wrangled_IEDB.csv")

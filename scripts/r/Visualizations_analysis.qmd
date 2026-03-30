@@ -1,0 +1,82 @@
+---
+title: "Visualizations_analysis"
+format: html
+editor: visual
+---
+
+## 
+
+### Libraries
+
+```{r}
+library(tidyverse)
+library(readr)
+library(knitr)
+library(scales)
+library(here)
+```
+
+### Data import
+
+```{r}
+match_df <- read_csv(here("data", "proccesed", "perfect_matches_2_0.csv"))
+protein_meta <- read_csv(here("data", "intermediate", "protein_metadata.csv"))
+iedb_df <- read_csv(here("data", "intermediate", "wrangled_IEDB.csv"))
+```
+
+### Initial inspection
+
+```{r}
+match_df |>
+  summarise(
+    total_rows = n(),
+    matched_rows = sum(Matched, na.rm = TRUE),
+    unique_epitopes = n_distinct(Assay_ID),
+    matched_epitopes = n_distinct(Assay_ID[Matched]),
+    unique_proteins = n_distinct(Pathogen_Protein_ID[Matched])
+  )
+```
+
+### matches per epitopes
+
+```{r}
+match_df |>
+  filter(Matched) |>
+  count(Assay_ID) |>
+  ggplot(aes(x = n)) +
+  geom_histogram(bins = 100) +
+  theme_minimal() +
+  labs(
+    title = "Matches per epitope",
+    x = "Number of matches",
+    y = "Number of epitopes"
+  )
+```
+
+### Matches per strain
+
+```{r}
+match_df |>
+  filter(Matched) |>
+  count(Strain, sort = TRUE) |>
+  slice_head(n = 20) %>%
+  ggplot(aes(x = reorder(Strain, n), y = n)) +
+  geom_col() +
+  coord_flip()
+```
+
+### quick analysis
+
+```{r}
+iedb_df |>
+  group_by(Protein_source) |>
+  summarise(n = n()) |>
+  count(Protein_source, sort = TRUE) |>
+  slice_head(n = 20) |>
+  ggplot(aes(x = reorder(Protein_source, n), y = n)) +
+  geom_col() +
+  coord_flip()
+
+iedb_df |>
+  filter(Protein_source == "Integrin beta-3")
+```
