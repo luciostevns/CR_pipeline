@@ -21,6 +21,7 @@ library(here)
 ```{r}
 match_df <- read_csv(here("data", "proccesed", "perfect_matches_2_0.csv"))
 protein_meta <- read_csv(here("data", "intermediate", "protein_metadata.csv"))
+
 iedb_df <- read_csv(here("data", "intermediate", "wrangled_IEDB.csv"))
 ```
 
@@ -33,50 +34,60 @@ match_df |>
     matched_rows = sum(Matched, na.rm = TRUE),
     unique_epitopes = n_distinct(Assay_ID),
     matched_epitopes = n_distinct(Assay_ID[Matched]),
-    unique_proteins = n_distinct(Pathogen_Protein_ID[Matched])
+    unique_proteins = n_distinct(Pathogen_Protein_ID[Matched]),
+    unique_pathogens = n_distinct(Pathogen_Organism)
   )
-```
 
-### matches per epitopes
-
-```{r}
-match_df |>
-  filter(Matched) |>
-  count(Assay_ID) |>
-  ggplot(aes(x = n)) +
-  geom_histogram(bins = 100) +
-  theme_minimal() +
-  labs(
-    title = "Matches per epitope",
-    x = "Number of matches",
-    y = "Number of epitopes"
-  )
+protein_meta |>
+  summarise(unique_pathogens = n_distinct(Genus_Species))
 ```
 
 ### Matches per strain
 
 ```{r}
-match_df |>
-  filter(Matched) |>
-  count(Strain, sort = TRUE) |>
-  slice_head(n = 20) %>%
-  ggplot(aes(x = reorder(Strain, n), y = n)) +
-  geom_col() +
-  coord_flip()
+
+# Top 15 species by number of proteomes
+protein_meta |>
+  group_by(Genus_Species) |>
+  summarise(n = n_distinct(Proteome_ID)) |>
+  arrange(desc(n)) |>
+  slice_head(n = 15) |>
+  ggplot(aes(x = reorder(Genus_Species, n), y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Number of Proteomes per Pathogen Species",
+    x = "Pathogen organism",
+    y = "Number of proteomes"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 8),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+protein_meta |>
+  group_by(Genus_Species) |>
+  summarise(n = n_distinct(Proteome_ID)) |>
+  ggplot(aes(x = n)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "black") +
+  labs(
+    title = "Distribution of Proteomes per Pathogen Species",
+    x = "Number of proteomes per species",
+    y = "Number of species"
+  ) +
+  theme_minimal()
 ```
 
 ### quick analysis
 
 ```{r}
-iedb_df |>
+new_iedb_df |>
   group_by(Protein_source) |>
   summarise(n = n()) |>
-  count(Protein_source, sort = TRUE) |>
+  arrange(desc(n)) |>
   slice_head(n = 20) |>
   ggplot(aes(x = reorder(Protein_source, n), y = n)) +
   geom_col() +
   coord_flip()
-
-iedb_df |>
-  filter(Protein_source == "Integrin beta-3")
 ```
