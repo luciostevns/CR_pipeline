@@ -13,10 +13,6 @@ IEDB_data_path = DATA_DIR / "intermediate/wrangled_IEDB.csv"
 output_path = DATA_DIR / "proccesed/perfect_matches_2_0.csv"
 
 pathogen_data = load_csv(pathogen_data_path)
-pathogen_data = pathogen_data.rename(columns={
-    "Genus_Species": "Organism",
-})
-
 IEDB_data = load_csv(IEDB_data_path)
 
 # prepare epitopes
@@ -71,9 +67,9 @@ def find_matches(pathogen_data, automaton):
         seq = row.Sequence
         pid = row.Protein_ID
         proteome_id = getattr(row, "Proteome_ID", None)
-        organism_id = getattr(row, "Organism_ID", None)
-        pathogen_organism = row.Organism
-        organism_source_fasta = getattr(row, "Organism_Source_FASTA", None)
+        pathogen_organism = getattr(row, "Genus_species", None)
+        pathogen_strain = getattr(row, "Strain", None)
+        scientific_name = getattr(row, "Scientific_name", None)
         annot = row.Annotation
         gene = getattr(row, "Gene_name", None)
 
@@ -87,8 +83,8 @@ def find_matches(pathogen_data, automaton):
 
                 matches.append((
                     assay_id, source, disease, ep_prot_id,
-                    pid, proteome_id, organism_id,
-                    pathogen_organism, organism_source_fasta,
+                    pid, proteome_id,
+                    pathogen_organism, scientific_name, pathogen_strain,
                     annot, gene,
                     sub, match_len,
                     match_start, match_end,
@@ -99,8 +95,8 @@ def find_matches(pathogen_data, automaton):
 
     match_df = pd.DataFrame(matches, columns=[
         "Assay_ID", "Epitope_Source", "Disease", "IEDB_Protein_ID",
-        "Pathogen_Protein_ID", "Proteome_ID", "Organism_ID",
-        "Pathogen_Organism", "Organism_Source_FASTA",
+        "Pathogen_Protein_ID", "Proteome_ID",
+        "Pathogen_Organism", "Pathogen_Scientific_name", "Pathogen_Strain",
         "Pathogen_Annotation", "Pathogen_Gene_Name",
         "Matched_seq", "Match_Length",
         "Pathogen_Start", "Pathogen_End",

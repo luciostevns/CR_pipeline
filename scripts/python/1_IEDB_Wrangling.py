@@ -1,17 +1,19 @@
+#%%
 # Imports
 import pandas as pd
-import re
-from collections import defaultdict
 from helpers import load_excel, save_csv, DATA_DIR
 
-################ Initial filtering and wrangling ###############################
+################ Load datasets ###############################################
 
-# Read the full IEDB dataset
-autoimmune_data = load_excel(DATA_DIR / "raw/IEDB_autoimmune_epitope_assays_raw.xlsx")
-print(f"Original dataset size: {len(autoimmune_data)}")
+autoimmune_ref = load_excel(DATA_DIR / "raw/IEDB_autoimmune_epitope_assays_raw.xlsx")
+general_IEDB_data = load_excel(DATA_DIR / "raw/IEDB_epitop_assays_raw.xlsx")
 
-# Rename columns
-autoimmune_data = autoimmune_data.rename(columns={
+print(f"Autoimmune reference dataset size: {len(autoimmune_ref)}")
+print(f"General IEDB dataset size: {len(general_IEDB_data)}")
+
+################ Rename columns ##############################################
+
+rename_dict = {
     "Assay ID - IEDB IRI": "Assay_ID",
     "Epitope - Name": "Sequence",
     "Epitope - Molecule Parent": "Protein_source",
@@ -21,32 +23,91 @@ autoimmune_data = autoimmune_data.rename(columns={
     "MHC Restriction - Name": "MHC_restriction",
     "Epitope - Starting Position": "epitope_start_pos",
     "Epitope - Ending Position": "epitope_end_pos"
-})
+}
 
-# Clean sequence and protein ID
-autoimmune_data["Sequence"] = (
-    autoimmune_data["Sequence"]
+autoimmune_ref = autoimmune_ref.rename(columns=rename_dict)
+general_IEDB_data = general_IEDB_data.rename(columns=rename_dict)
+
+################ Clean disease column ########################################
+
+autoimmune_ref["Disease"] = (
+    autoimmune_ref["Disease"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+)
+
+general_IEDB_data["Disease"] = (
+    general_IEDB_data["Disease"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+)
+
+################ Add missing autoimmune diseases #############################
+
+extra_autoimmune_diseases = {
+    "type 1 diabetes mellitus",
+    "autoimmune hemolytic anemia",
+    "primary biliary cholangitis",
+    "psoriatic arthritis",
+    "relapsing polychondritis",
+    "systemic scleroderma",
+    "Stiff-Person syndrome"
+}
+
+extra_data = general_IEDB_data[
+    general_IEDB_data["Disease"].isin(extra_autoimmune_diseases)
+].copy()
+
+print(f"Extra autoimmune rows added: {len(extra_data)}")
+print(extra_data["Disease"].value_counts())
+
+################ Combine datasets ############################################
+
+combined_data = pd.concat([autoimmune_ref, extra_data], ignore_index=True)
+
+# Remove duplicates (important!)
+combined_data = combined_data.drop_duplicates(subset=["Assay_ID"])
+
+print(f"Combined dataset size: {len(combined_data)}")
+
+################ Basic cleaning ##############################################
+
+combined_data["Sequence"] = (
+    combined_data["Sequence"]
+    .fillna("")
+    .astype(str)
     .str.replace(r"\+.*", "", regex=True)
     .str.strip()
 )
 
-autoimmune_data["Protein_ID"] = autoimmune_data["Protein_ID"].str.extract(r"([^/]+$)")
+combined_data["Protein_ID"] = (
+    combined_data["Protein_ID"]
+    .fillna("")
+    .astype(str)
+    .str.extract(r"([^/]+$)", expand=False)
+)
 
-# Filtering
-autoimmune_data_wrangled = autoimmune_data[
-    autoimmune_data["Epitope - Modified residues"].isna() &
-    autoimmune_data["Sequence"].str.len().between(12, 25)
+################ Filtering ###################################################
+
+combined_data_wrangled = combined_data[
+    combined_data["Epitope - Modified residues"].isna() &
+    combined_data["Sequence"].str.len().between(12, 25)
 ].copy()
-print(f"Dataset size after basic filtering: {len(autoimmune_data_wrangled)}")
 
-# Remove duplicate sequences with same protein ID (keep first occurrence)
-autoimmune_data_wrangled = autoimmune_data_wrangled.drop_duplicates(
+print(f"Dataset size after basic filtering: {len(combined_data_wrangled)}")
+
+# Remove duplicate sequences per protein
+combined_data_wrangled = combined_data_wrangled.drop_duplicates(
     subset=["Protein_ID", "Sequence"]
 )
-print(f"Dataset size after removing duplicate seqs: {len(autoimmune_data_wrangled)}")
 
-# Select relevant columns
-autoimmune_data_wrangled = autoimmune_data_wrangled[
+print(f"Dataset size after removing duplicate seqs: {len(combined_data_wrangled)}")
+
+################ Select relevant columns #####################################
+
+combined_data_wrangled = combined_data_wrangled[
     [
         "Assay_ID",
         "Sequence",
@@ -60,11 +121,11 @@ autoimmune_data_wrangled = autoimmune_data_wrangled[
     ]
 ]
 
-################ Nested epitope removal #######################################
+################ Nested epitope removal ######################################
 
 grouped_results = []
 
-for protein_id, group in autoimmune_data_wrangled.groupby("Protein_ID", sort=False):
+for protein_id, group in combined_data_wrangled.groupby("Protein_ID", sort=False):
     group = group.copy()
     seqs = group["Sequence"].tolist()
 
@@ -77,16 +138,18 @@ for protein_id, group in autoimmune_data_wrangled.groupby("Protein_ID", sort=Fal
         is_nested.append(nested)
 
     group["Is_nested"] = is_nested
-    group["Protein_ID"] = protein_id
     grouped_results.append(group)
 
-autoimmune_data_wrangled = pd.concat(grouped_results, ignore_index=True)
+combined_data_wrangled = pd.concat(grouped_results, ignore_index=True)
 
-filtered_sequences = autoimmune_data_wrangled[
-    ~autoimmune_data_wrangled["Is_nested"]
+filtered_sequences = combined_data_wrangled[
+    ~combined_data_wrangled["Is_nested"]
 ].drop(columns=["Is_nested"])
 
 print(f"Dataset size after removing nested epitopes: {len(filtered_sequences)}")
-# Write output
+
+################ Save #########################################################
+
 print(filtered_sequences.columns.tolist())
 save_csv(filtered_sequences, DATA_DIR / "intermediate/wrangled_IEDB.csv")
+# %%

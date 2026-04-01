@@ -11,16 +11,21 @@ editor: visual
 ```{r}
 library("tidyverse")
 library("tidytext")
-library("Biostrings")
+#library("Biostrings")
 library("ggvenn")
-library("ggtree")
+#library("ggtree")
 library("patchwork")
+library("here")
 ```
 
 ### Data load:
 
 ```{r}
-perfect_match <- read_csv("../Data/perfect_matches_finished.csv")
+perfect_match <- read_csv(here("data", "proccesed", "perfect_matches_2_0.csv"))
+pathogen_data <- read_csv(here("data", "intermediate", "protein_metadata.csv"))
+
+IEDB_data <- read_csv(here("data", "intermediate", "wrangled_IEDB.csv"))
+
 
 perfect_match <- perfect_match |>
     mutate(
@@ -29,7 +34,6 @@ perfect_match <- perfect_match |>
       TRUE ~ Epitope_Source
     ))
 
-pathogen_data <- read_csv("../Data/wrangled_all_pathogen_prots.csv")
 
 pathogen_data <- pathogen_data |>
   dplyr::rename("Pathogen_Annotation" = "Annotation",
@@ -37,7 +41,6 @@ pathogen_data <- pathogen_data |>
   rowwise() |>
   mutate(protein_len = str_length(Sequence))
 
-IEDB_data <- read_csv("../Data/wrangled_IEDB_with_sequences.csv")
 
 IEDB_data <- IEDB_data |>
   dplyr::rename(IEDB_Protein_ID = "Protein_ID",
@@ -49,7 +52,7 @@ IEDB_data <- IEDB_data |>
     ))
 
 
-fasta_files <- list.files("../Data/proteome_fastas_strain", pattern = "\\.fasta$", full.names = TRUE)
+#fasta_files <- list.files("../Data/proteome_fastas_strain", pattern = "\\.fasta$", full.names = TRUE)
 ```
 
 ### Organism distribution in Bacterial proteomes data:
@@ -257,10 +260,9 @@ IEDB_data |>
 
 ```{r}
 perfect_match |>
-  left_join(distinct(select(pathogen_data, Protein_ID), .keep_all = TRUE),
+  left_join(distinct(select(pathogen_data, Protein_ID, protein_len), .keep_all = TRUE),
             by = c("Pathogen_Protein_ID" = "Protein_ID")) |>
-  mutate(seq_len = nchar(Sequence),
-         bin = cut(seq_len, breaks = 200)) |>
+  mutate(bin = cut(protein_len, breaks = 200)) |>
   group_by(bin) |>
   summarise(
     protein_count = n(),
@@ -280,12 +282,6 @@ perfect_match |>
   ) +
   scale_y_log10() +
   scale_fill_viridis_c(option = "D") +
-  scale_x_continuous(
-  name = "Approx. Protein Length (AA)",
-  breaks = seq(0, 12000, by = 100),  # Adjust max based on your data
-  labels = scales::label_comma(),
-  expand = c(0, 0)
-) +
   theme_minimal() +
   labs(
     title = "Histogram of Pathogen Protein Lengths in Perfect Match",
@@ -352,7 +348,7 @@ perfect_match |>
 ### Organism analysis in perfect match:
 
 ```{r}
-# Step 1: Summarize total proteins and AA per organism
+# Summarize total proteins and AA per organism
 organism_protein_counts <- pathogen_data |>
   group_by(Organism_Source) |>
   summarise(
@@ -361,17 +357,18 @@ organism_protein_counts <- pathogen_data |>
     .groups = "drop"
   )
 
-# Step 2: Merge with perfect match counts
+# Merge with perfect match counts
 organism_match_stats <- perfect_match |>
-  group_by(Organism_Source) |>
-  summarise(organism_count = n(), .groups = "drop") |>
-  left_join(organism_protein_counts, by = "Organism_Source") |>
-  arrange(desc(organism_count)) |>
-  filter(!is.na(Organism_Source))
+  group_by(Pathogen_Organism) |>
+  summarise(pathogen_count = n(), .groups = "drop") |>
+  left_join(organism_protein_counts,
+            by = c("Pathogen_Organism" = "Organism_Source")) |>
+  arrange(desc(pathogen_count)) |>
+  filter(!is.na(Pathogen_Organism))
 
 # Step 3a: All organisms plot (no organism names)
-p_all <- ggplot(organism_match_stats, aes(x = reorder(Organism_Source, -organism_count), 
-                                          y = organism_count, fill = total_AA)) +
+p_all <- ggplot(organism_match_stats, aes(x = reorder(Pathogen_Organism, -pathogen_count), 
+                                          y = pathogen_count, fill = total_AA)) +
   geom_bar(stat = "identity") +
   scale_y_log10() +
   scale_fill_viridis_c(option = "D") +
@@ -391,9 +388,9 @@ p_all <- ggplot(organism_match_stats, aes(x = reorder(Organism_Source, -organism
 
 # Step 3b: Top 20 organisms plot (with names)
 p_top20 <- organism_match_stats |>
-  slice_max(organism_count, n = 20) |>
-  ggplot(aes(x = reorder(Organism_Source, organism_count), 
-             y = organism_count, fill = total_AA)) +
+  slice_max(pathogen_count, n = 20) |>
+  ggplot(aes(x = reorder(Pathogen_Organism, pathogen_count), 
+             y = pathogen_count, fill = total_AA)) +
   geom_bar(stat = "identity") +
   scale_y_log10() +
   scale_fill_viridis_c(option = "D") +
@@ -411,8 +408,8 @@ p_top20 <- organism_match_stats |>
 
 # Step 4: Combine and save
 combined_plot <- p_top20 + p_all + plot_layout(ncol = 2)
-
-ggsave("./final plots/perfect_match_organism_distribution_combined.png", combined_plot, width = 16, height = 7, dpi = 300)
+combined_plot
+#ggsave("./final plots/perfect_match_organism_distribution_combined.png", combined_plot, width = 16, height = 7, dpi = 300)
 ```
 
 ### Organism enrichment analysis:
@@ -478,16 +475,18 @@ ggplot(head(enrichment_data,20), aes(x = reorder(Organism_Source, -enrichment_sc
 
 ```{r}
 org_disease_analysis <- perfect_match |> 
-  group_by(Organism_Source, Disease) |> 
+  filter(Matched) |>
+  group_by(Pathogen_Organism, Disease) |> 
   summarise(num_epitopes = n_distinct(Assay_ID)) |>
   arrange(desc(num_epitopes))
 
 summarized_data <- perfect_match |> 
-  group_by(Organism_Source) |> 
+  filter(Matched) |>
+  group_by(Pathogen_Organism) |> 
   summarise(num_epitopes = sum(n_distinct(Assay_ID)), .groups = "drop") |> 
   arrange(desc(num_epitopes))
 
-ggplot(org_disease_analysis, aes(x = factor(Organism_Source, levels = summarized_data$Organism_Source), 
+ggplot(org_disease_analysis, aes(x = factor(Pathogen_Organism, levels = summarized_data$Pathogen_Organism), 
                           y = num_epitopes, fill = Disease)) +
   geom_bar(position = "stack", stat="identity") +
   theme_minimal() +
@@ -503,9 +502,9 @@ ggplot(org_disease_analysis, aes(x = factor(Organism_Source, levels = summarized
   )
 
 top_20_analysis <- org_disease_analysis |> 
-  filter(Organism_Source %in% head(summarized_data,20)$Organism_Source)
+  filter(Pathogen_Organism %in% head(summarized_data,20)$Pathogen_Organism)
 
-ggplot(top_20_analysis, aes(x = factor(Organism_Source, levels = head(summarized_data, 20)$Organism_Source), 
+ggplot(top_20_analysis, aes(x = factor(Pathogen_Organism, levels = head(summarized_data, 20)$Pathogen_Organism), 
                           y = num_epitopes, fill = Disease)) +
   geom_bar(position = "stack", stat="identity") +
   theme_minimal() +
@@ -729,14 +728,14 @@ for (col in names(significant_fisher_results)) {
 ```{r}
 perfect_match |>
   filter(Matched) |>
-  group_by(Organism_Source, Strain) |>
+  group_by(Proteome_ID) |>
   summarise(n_matches = n(), .groups = "drop") |>
-  ggplot(aes(x = reorder(Organism_Source,n_matches), y = n_matches)) +
+  ggplot(aes(x = reorder(Proteome_ID,n_matches), y = n_matches)) +
   geom_boxplot() +
   labs(
-    title = "Distribution of Matches per Strain by Species",
-    x = "Species",
-    y = "Number of Matches per Strain"
+    title = "Distribution of Matches per Proteome ID",
+    x = "Proteomes",
+    y = "Number of Matches per Proteome ID"
   ) +
   theme(
     axis.text.x = element_blank(),  # Remove organism names for cleaner visualization
@@ -826,12 +825,12 @@ normalized_matches |>
 ```{r}
 epitopes_to_species <- perfect_match |>
   filter(Matched) |>
-  distinct(Assay_ID, Organism_Source) |>
+  distinct(Assay_ID, Pathogen_Organism) |>
   count(Assay_ID, name = "species_matched")
 
 species_to_epitopes <- perfect_match |>
-  distinct(Assay_ID, Organism_Source) |>
-  count(Organism_Source, name = "epitopes_matched")
+  distinct(Assay_ID, Pathogen_Organism) |>
+  count(Pathogen_Organism, name = "epitopes_matched")
 
 ggplot(epitopes_to_species, aes(x = species_matched)) +
   geom_histogram(binwidth = 1, fill = "skyblue", color = "white") +
@@ -889,12 +888,12 @@ ggplot(heatmap_prop_data, aes(x = Organism_Source, y = Assay_ID, fill = strain_m
 ### Is few species cauing most of the matches?:
 
 ```{r}
-# Step 1: Count number of pathogen matches per species (across all diseases)
+# Count number of pathogen matches per species (across all diseases)
 species_match_counts <- perfect_match |>
   filter(Matched) |>
-  count(Organism_Source, name = "match_count")
+  count(Pathogen_Organism, name = "match_count")
 
-# Step 2: Get total number of strains per species from original dataset
+# Get total number of strains per species from original dataset
 total_strains_per_species <- Original_organism_df |>
   distinct(Genus_Species, Strain) |>
   count(Genus_Species, name = "strain_count")
@@ -929,13 +928,13 @@ Epitope_groups <- perfect_match |>
   distinct(Assay_ID, Pathogen_Protein_ID, .keep_all = TRUE) |>
   group_by(Assay_ID) |>
   summarise(
-    org_prot_matches = n_distinct(Organism_Source),
+    org_prot_matches = n_distinct(Pathogen_Organism),
     Diseases_unique = unique(Disease),
     Diseases = list(Disease),
-    Species_unique = list(unique(Organism_Source)),
-    Species = list(Organism_Source),
-    Strains_unique = list(unique(Strain)),
-    Strains = list(paste(Organism_Source, "(", Strain, ")", sep = "")),
+    Species_unique = list(unique(Pathogen_Organism)),
+    Species = list(Pathogen_Organism),
+    Strains_unique = list(unique(Proteome_ID)),
+    Strains = list(paste(Pathogen_Organism, "(", Proteome_ID, ")", sep = "")),
     pathogen_proteins = list(Pathogen_Protein_ID),
     pathogen_proteins_unique = list(unique(Pathogen_Protein_ID)),
     pathogen_prot_Subcellular_Location = list(pathogen_prot_Subcellular_Location),

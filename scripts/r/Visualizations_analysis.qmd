@@ -25,24 +25,7 @@ protein_meta <- read_csv(here("data", "intermediate", "protein_metadata.csv"))
 iedb_df <- read_csv(here("data", "intermediate", "wrangled_IEDB.csv"))
 ```
 
-### Initial inspection
-
-```{r}
-match_df |>
-  summarise(
-    total_rows = n(),
-    matched_rows = sum(Matched, na.rm = TRUE),
-    unique_epitopes = n_distinct(Assay_ID),
-    matched_epitopes = n_distinct(Assay_ID[Matched]),
-    unique_proteins = n_distinct(Pathogen_Protein_ID[Matched]),
-    unique_pathogens = n_distinct(Pathogen_Organism)
-  )
-
-protein_meta |>
-  summarise(unique_pathogens = n_distinct(Genus_Species))
-```
-
-### Matches per strain
+### Pathogen data inspection
 
 ```{r}
 
@@ -79,15 +62,74 @@ protein_meta |>
   theme_minimal()
 ```
 
-### quick analysis
+### IEDB data inspection
 
 ```{r}
-new_iedb_df |>
+# Top 15 epitope source proteins by number of epitopes
+iedb_df |>
   group_by(Protein_source) |>
   summarise(n = n()) |>
   arrange(desc(n)) |>
-  slice_head(n = 20) |>
+  slice_head(n = 15) |>
   ggplot(aes(x = reorder(Protein_source, n), y = n)) +
-  geom_col() +
-  coord_flip()
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Number of Epitopes per Source Protein",
+    x = "Epitope source protein",
+    y = "Number of epitopes"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 8),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+# Histogram of epitope counts per source protein
+iedb_df |>
+  count(Protein_source, name = "n") |>
+  ggplot(aes(x = n)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "black") +
+  labs(
+    title = "Distribution of Epitopes per Source Protein",
+    x = "Number of epitopes per source protein",
+    y = "Number of source proteins"
+  ) +
+  theme_minimal()
+```
+
+### matches inspection (IEDB data)
+
+```{r}
+# Top 15 epitope source proteins by number of epitopes
+match_df |>
+  group_by(IEDB_Protein_ID) |>
+  summarise(n = n()) |>
+  arrange(desc(n)) |>
+  slice_head(n = 15) |>
+  ggplot(aes(x = reorder(IEDB_Protein_ID, n), y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Number of matches per IEDB protein",
+    x = "Epitope source protein",
+    y = "Number of Matches"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 8),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+# Histogram of epitope counts per source protein
+match_df |>
+  count(IEDB_Protein_ID, name = "n") |>
+  ggplot(aes(x = n)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "black") +
+  labs(
+    title = "Distribution of matches per IEDB protein",
+    x = "Number of matches per source protein",
+    y = "Number of unique source proteins"
+  ) +
+  theme_minimal()
 ```

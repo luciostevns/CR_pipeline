@@ -11,24 +11,33 @@ editor: visual
 ```{r}
 library("tidyverse")
 library("patchwork")
-library("Biostrings")
+library("here")
+#library("Biostrings")
 ```
 
 ### Data import:
 
 ```{r}
-perfect_match <- read_csv("../Data/perfect_matches_finished.csv")
+perfect_match <- read_csv(here("data", "proccesed", "perfect_matches_2_0.csv"))
+pathogen_data <- read_csv(here("data", "intermediate", "protein_metadata.csv"))
+
+IEDB_data <- read_csv(here("data", "intermediate", "wrangled_IEDB.csv"))
+
 
 perfect_match <- perfect_match |>
     mutate(
     Epitope_Source = case_when(
       str_detect(Epitope_Source, "acetyltransferase component of pyruvate dehydrogenase complex") ~ "acetyltransferase",
       TRUE ~ Epitope_Source
-    )) |>
-  distinct(Assay_ID, Pathogen_Protein_ID, Strain, .keep_all = TRUE)
+    ))
 
 
-IEDB_data <- read_csv("../Data/wrangled_IEDB_with_sequences.csv")
+pathogen_data <- pathogen_data |>
+  dplyr::rename("Pathogen_Annotation" = "Annotation",
+                "Organism_Source" = Genus_Species) |>
+  rowwise() |>
+  mutate(protein_len = str_length(Sequence))
+
 
 IEDB_data <- IEDB_data |>
   dplyr::rename(IEDB_Protein_ID = "Protein_ID",
@@ -40,22 +49,14 @@ IEDB_data <- IEDB_data |>
     ))
 
 
-NetsurfP_epitopes <- read_csv("../Data/NetsurfP_epitopes.csv")
-NetsurfP_pathogen_1 <- read_csv("../Data/NetsurfP_pathogen_1.csv")
-NetsurfP_pathogen_2 <- read_csv("../Data/NetsurfP_pathogen_2.csv")
-NetsurfP_pathogen_3 <- read_csv("../Data/NetsurfP_pathogen_3.csv")
-NetsurfP_pathogen_4 <- read_csv("../Data/NetsurfP_pathogen_4.csv")
-NetsurfP_pathogen_5 <- read_csv("../Data/NetsurfP_pathogen_5.csv")
+#NetsurfP_epitopes <- read_csv("../Data/NetsurfP_epitopes.csv")
+#NetsurfP_pathogen_1 <- read_csv("../Data/NetsurfP_pathogen_1.csv")
+#NetsurfP_pathogen_2 <- read_csv("../Data/NetsurfP_pathogen_2.csv")
+#NetsurfP_pathogen_3 <- read_csv("../Data/NetsurfP_pathogen_3.csv")
+#NetsurfP_pathogen_4 <- read_csv("../Data/NetsurfP_pathogen_4.csv")
+#NetsurfP_pathogen_5 <- read_csv("../Data/NetsurfP_pathogen_5.csv")
 
-fasta_files <- list.files("../Data/proteome_fastas_strain", pattern = "\\.fasta$", full.names = TRUE)
-
-pathogen_data <- read_csv("../Data/wrangled_all_pathogen_prots.csv")
-
-pathogen_data <- pathogen_data |>
-  dplyr::rename("Pathogen_Annotation" = "Annotation",
-                "Organism_Source" = Genus_Species) |>
-  rowwise() |>
-  mutate(protein_len = str_length(Sequence))
+#fasta_files <- list.files("../Data/proteome_fastas_strain", pattern = "\\.fasta$", full.names = TRUE)
 ```
 
 ### Epitope attribute table and RSA/subcellular addition:
@@ -152,67 +153,67 @@ my_theme <- theme_bw(base_size = 12) +
   )
 
 
-# p2: Distribution of epitope region RSA, grouped by match status
-p1 <- epitope_attributes |>
-  ggplot(aes(x = rsa_epitope, fill = as.factor(Matched))) +
-  geom_histogram(bins = 30, position = "dodge", color = "white", alpha = 0.7) +
-  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100), labels = c("0", "1", "10", "100"), limits = c(0, 100)) +
-  labs(x = "Mean RSA of Epitope Region", y = "Epitipe frequency (log 10)", fill = "Matched") +
-  xlim(0, 1) +
-  my_theme +
-  theme(
-  axis.title.x = element_text(size = 8),
-  axis.title.y = element_text(size = 8)
-)
-
-
-# p4: Distribution of RSA values for pathogen regions matched to epitopes
-p2 <- epitope_attributes |>
-  filter(Matched) |>
-  unnest(matched_pathogens) |>
-  ggplot(aes(x = rsa_pathogen_peptide)) +
-  geom_histogram(bins = 30, fill = "darkorange", color = "white") +
-  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000), labels = c("0", "1", "10", "100", "1000")) +
-  labs(x = "Mean RSA of Matched Pathogen Region", y = "Peptide frequency (log 10)") +
-  xlim(0, 1) +
-  my_theme +
-  theme(
-  axis.title.x = element_text(size = 8),
-  axis.title.y = element_text(size = 8)
-)
-
-
-# Prepare data for boxplot
-df_p3 <- bind_rows(
-  epitope_attributes |> 
-    filter(!Matched) |> 
-    mutate(source = "Unmatched Epitope", value = rsa_epitope) |> 
-    select(source, value), epitope_attributes |> 
-    filter(Matched) |> 
-    mutate(source = "Matched Epitope", value = rsa_epitope) |> 
-    select(source, value), epitope_attributes |> 
-    filter(Matched) |> 
-    unnest(matched_pathogens) |> 
-    mutate(source = "Pathogen Region", value = rsa_pathogen_peptide) |> 
-    select(source, value)
-)
-
-# Create boxplot
-p3 <- ggplot(df_p3, aes(x = source, y = value, fill = source)) +
-  geom_boxplot(outlier.shape = NA, alpha = 0.8, color = "black") +
-  scale_y_continuous(limits = c(0, 1)) +
-  scale_fill_manual(values = c(
-    "Unmatched Epitope" = "steelblue",
-    "Matched Epitope" = "seagreen",
-    "Pathogen Region" = "darkorange"
-  )) +
-  labs(x = NULL, y = "Mean RSA", fill = NULL) +
-  my_theme +
-  theme(legend.position = "none") +
-  theme(
-  axis.title.x = element_text(size = 8),
-  axis.title.y = element_text(size = 8)
-)
+# # p2: Distribution of epitope region RSA, grouped by match status
+# p1 <- epitope_attributes |>
+#   ggplot(aes(x = rsa_epitope, fill = as.factor(Matched))) +
+#   geom_histogram(bins = 30, position = "dodge", color = "white", alpha = 0.7) +
+#   scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100), labels = c("0", "1", "10", "100"), limits = c(0, 100)) +
+#   labs(x = "Mean RSA of Epitope Region", y = "Epitipe frequency (log 10)", fill = "Matched") +
+#   xlim(0, 1) +
+#   my_theme +
+#   theme(
+#   axis.title.x = element_text(size = 8),
+#   axis.title.y = element_text(size = 8)
+# )
+# 
+# 
+# # p4: Distribution of RSA values for pathogen regions matched to epitopes
+# p2 <- epitope_attributes |>
+#   filter(Matched) |>
+#   unnest(matched_pathogens) |>
+#   ggplot(aes(x = rsa_pathogen_peptide)) +
+#   geom_histogram(bins = 30, fill = "darkorange", color = "white") +
+#   scale_y_continuous(trans = "log1p", breaks = c(0, 1, 10, 100, 1000), labels = c("0", "1", "10", "100", "1000")) +
+#   labs(x = "Mean RSA of Matched Pathogen Region", y = "Peptide frequency (log 10)") +
+#   xlim(0, 1) +
+#   my_theme +
+#   theme(
+#   axis.title.x = element_text(size = 8),
+#   axis.title.y = element_text(size = 8)
+# )
+# 
+# 
+# # Prepare data for boxplot
+# df_p3 <- bind_rows(
+#   epitope_attributes |> 
+#     filter(!Matched) |> 
+#     mutate(source = "Unmatched Epitope", value = rsa_epitope) |> 
+#     select(source, value), epitope_attributes |> 
+#     filter(Matched) |> 
+#     mutate(source = "Matched Epitope", value = rsa_epitope) |> 
+#     select(source, value), epitope_attributes |> 
+#     filter(Matched) |> 
+#     unnest(matched_pathogens) |> 
+#     mutate(source = "Pathogen Region", value = rsa_pathogen_peptide) |> 
+#     select(source, value)
+# )
+# 
+# # Create boxplot
+# p3 <- ggplot(df_p3, aes(x = source, y = value, fill = source)) +
+#   geom_boxplot(outlier.shape = NA, alpha = 0.8, color = "black") +
+#   scale_y_continuous(limits = c(0, 1)) +
+#   scale_fill_manual(values = c(
+#     "Unmatched Epitope" = "steelblue",
+#     "Matched Epitope" = "seagreen",
+#     "Pathogen Region" = "darkorange"
+#   )) +
+#   labs(x = NULL, y = "Mean RSA", fill = NULL) +
+#   my_theme +
+#   theme(legend.position = "none") +
+#   theme(
+#   axis.title.x = element_text(size = 8),
+#   axis.title.y = element_text(size = 8)
+# )
 
 
 
