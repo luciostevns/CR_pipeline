@@ -14,6 +14,9 @@ library(readr)
 library(knitr)
 library(scales)
 library(here)
+library(patchwork)
+library(forcats)
+library(grid)
 ```
 
 ### Data import
@@ -28,38 +31,137 @@ iedb_df <- read_csv(here("data", "intermediate", "wrangled_IEDB.csv"))
 ### Pathogen data inspection
 
 ```{r}
+# =========================
+# PREP DATA
+# =========================
 
-# Top 15 species by number of proteomes
-protein_meta |>
-  group_by(Genus_Species) |>
-  summarise(n = n_distinct(Proteome_ID)) |>
-  arrange(desc(n)) |>
+# Proteome counts per species
+proteome_counts <- protein_meta |>
+  group_by(Genus_species) |>
+  summarise(n = n_distinct(Proteome_ID), .groups = "drop") |>
+  arrange(desc(n))
+
+# Sequence lengths per species
+proteome_sizes <- protein_meta |>
+  mutate(seq_len = nchar(Sequence)) |>
+  group_by(Genus_species) |>
+  summarise(cumulative_seq_len = sum(seq_len)) |>
+  arrange(desc(cumulative_seq_len))
+
+# =========================
+# FIGURE A: Proteome counts
+# =========================
+
+p1 <- proteome_counts |>
   slice_head(n = 15) |>
-  ggplot(aes(x = reorder(Genus_Species, n), y = n)) +
+  ggplot(aes(x = reorder(Genus_species, n), y = n)) +
   geom_col(fill = "steelblue") +
   coord_flip() +
-  labs(
-    title = "Number of Proteomes per Pathogen Species",
-    x = "Pathogen organism",
-    y = "Number of proteomes"
+  labs(x = NULL,
+       y = "Number of proteomes") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8),
+        panel.grid.minor = element_blank())
+
+p2 <- proteome_counts |>
+  ggplot(aes(x = n)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "black") +
+  labs(x = "Number of proteomes per species",
+       y = "Number of species"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+
+fig_A <- p1 + p2 +
+  plot_layout(widths = c(1.3, 1)) +
+  plot_annotation(tag_levels = "A")
+
+# =========================
+# FIGURE B: Proteome sizes
+# =========================
+
+p3 <- proteome_sizes |>
+  slice_head(n = 15) |>
+  ggplot(aes(x = reorder(Genus_species, cumulative_seq_len),
+             y = cumulative_seq_len)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(x = NULL,
+       y = "Total amino acids"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8),
+        panel.grid.minor = element_blank())
+
+p4 <- proteome_sizes |>
+  ggplot(aes(x = cumulative_seq_len)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "black") +
+  labs(x = "Total amino acids per species",
+       y = "Number of species"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+
+fig_B <- p3 + p4 +
+  plot_layout(widths = c(1.3, 1)) +
+  plot_annotation(tag_levels = "A")
+
+# =========================
+# SHOW
+# =========================
+
+fig_A
+fig_B
+
+rm(list = "p1", "p2", "p3", "p4", "fig_A", "fig_B",
+   "proteome_counts", "proteome_sizes")
+```
+
+### Matches inspection (pathogen data)
+
+```{r}
+# Make summary data once
+species_match_counts <- match_df |>
+  filter(Matched) |>
+  group_by(Pathogen_Organism) |>
+  summarise(n = n(), .groups = "drop") |>
+  arrange(desc(n))
+
+# Plot A: top 15 species
+p1 <- species_match_counts |>
+  slice_head(n = 15) |>
+  ggplot(aes(x = reorder(Pathogen_Organism, n), y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(x = NULL,
+       y = "Number of matches"
   ) +
   theme_minimal() +
   theme(
     axis.text.y = element_text(size = 8),
-    plot.title = element_text(hjust = 0.5, face = "bold")
+    panel.grid.minor = element_blank()
   )
 
-protein_meta |>
-  group_by(Genus_Species) |>
-  summarise(n = n_distinct(Proteome_ID)) |>
+# Plot B: histogram of all species
+p2 <- species_match_counts |>
   ggplot(aes(x = n)) +
   geom_histogram(bins = 40, fill = "steelblue", color = "black") +
-  labs(
-    title = "Distribution of Proteomes per Pathogen Species",
-    x = "Number of proteomes per species",
-    y = "Number of species"
+  labs(x = "Number of matches per species",
+       y = "Number of species"
   ) +
-  theme_minimal()
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+
+# Combine with patchwork
+combined_plot <- p1 + p2 +
+  plot_annotation(tag_levels = "A") &
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+
+combined_plot
+
+rm(list = c("species_match_counts", "p1", "p2", "combined_plot"))
 ```
 
 ### IEDB data inspection
@@ -101,35 +203,185 @@ iedb_df |>
 ### matches inspection (IEDB data)
 
 ```{r}
-# Top 15 epitope source proteins by number of epitopes
-match_df |>
-  group_by(IEDB_Protein_ID) |>
-  summarise(n = n()) |>
-  arrange(desc(n)) |>
+# =========================
+# PREP DATA
+# =========================
+
+protein_match_counts <- match_df |>
+  group_by(Epitope_Source) |>
+  summarise(n = n(), .groups = "drop") |>
+  arrange(desc(n))
+
+# =========================
+# PLOTS
+# =========================
+
+# Top 15 proteins
+p1 <- protein_match_counts |>
   slice_head(n = 15) |>
-  ggplot(aes(x = reorder(IEDB_Protein_ID, n), y = n)) +
+  ggplot(aes(x = reorder(Epitope_Source, n), y = n)) +
   geom_col(fill = "steelblue") +
+  scale_y_log10() +
   coord_flip() +
   labs(
-    title = "Number of matches per IEDB protein",
-    x = "Epitope source protein",
-    y = "Number of Matches"
+    x = "log10(Epitope source protein)",
+    y = "Number of matches"
   ) +
   theme_minimal() +
   theme(
     axis.text.y = element_text(size = 8),
-    plot.title = element_text(hjust = 0.5, face = "bold")
+    panel.grid.minor = element_blank()
   )
 
-# Histogram of epitope counts per source protein
-match_df |>
-  count(IEDB_Protein_ID, name = "n") |>
+# Histogram
+p2 <- protein_match_counts |>
   ggplot(aes(x = n)) +
   geom_histogram(bins = 50, fill = "steelblue", color = "black") +
+  scale_x_log10() +
   labs(
-    title = "Distribution of matches per IEDB protein",
-    x = "Number of matches per source protein",
-    y = "Number of unique source proteins"
+    x = "log10(Number of matches per source protein)",
+    y = "Number of source proteins"
   ) +
-  theme_minimal()
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank()
+  )
+
+p3 <- match_df |>
+  filter(Matched) |>
+  group_by(Assay_ID) |>
+  summarise(n = n()) |>
+  arrange(desc(n)) |>
+  ggplot(aes(x = n)) +
+  geom_histogram(bins = 20, fill = "steelblue", color = "black") +
+  scale_x_log10() +
+  labs(
+    x = "log10(Number of matches per Epitope)",
+    y = "Number of epitopes"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank()
+  )
+
+# =========================
+# COMBINE
+# =========================
+
+combined_plot <- p1 + p2 +
+  plot_layout(widths = c(1.3, 1)) +
+  plot_annotation(tag_levels = "A")
+
+combined_plot
+p3
+
+rm(list = "p1", "p2", "p3", "combined_plot")
+```
+
+### matched epitopes grouped by source protein and associated disease
+
+```{r}
+# Summary
+assay_summary <- match_df |>
+  filter(Matched) |>
+  count(Assay_ID, IEDB_Protein_ID, Disease, name = "n_matches") |>
+  group_by(IEDB_Protein_ID, Disease) |>
+  mutate(total_matches = sum(n_matches)) |>
+  ungroup() |>
+  mutate(
+    Protein_Disease = paste0(IEDB_Protein_ID, " (", Disease, ")"),
+    Protein_Disease = fct_reorder(Protein_Disease, total_matches, .desc = TRUE)
+  )
+
+# Plot
+p_all_assays <- ggplot(
+  assay_summary,
+  aes(
+    x = n_matches,
+    y = reorder(as.factor(Assay_ID), n_matches),
+    fill = IEDB_Protein_ID
+  )
+) +
+  geom_col() +
+  facet_grid(Protein_Disease ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_viridis_d(guide = "none") +
+  scale_x_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1000),
+    labels = c("0", "1", "10", "100", "1000")
+  ) +
+  labs(
+    x = "Number of matches (log scale)",
+    y = "Epitopes"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text.y = element_text(angle = 0, size = 7),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.spacing = unit(0.2, "lines"),
+    panel.grid = element_blank(),
+    axis.line.x = element_line(color = "black"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5)
+  )
+
+p_all_assays
+
+rm(list = "assay_summary", "p_all_assays")
+```
+
+```{r}
+# Prepare data
+protein_epitope_summary <- match_df |>
+  filter(Matched) |>
+  count(IEDB_Protein_ID, Assay_ID, name = "n_matches") |>
+  group_by(IEDB_Protein_ID) |>
+  mutate(total_matches = sum(n_matches)) |>
+  ungroup() |>
+  arrange(desc(total_matches))
+
+a# Keep top proteins (important for readability)
+top_proteins <- protein_epitope_summary |>
+  distinct(IEDB_Protein_ID, total_matches) |>
+  slice_max(total_matches, n = 10) |>
+  pull(IEDB_Protein_ID)
+
+plot_data <- protein_epitope_summary |>
+  filter(IEDB_Protein_ID %in% top_proteins) |>
+  mutate(IEDB_Protein_ID = fct_reorder(IEDB_Protein_ID, total_matches))
+
+# Plot
+p_fig3 <- ggplot(
+  plot_data,
+  aes(
+    x = IEDB_Protein_ID,
+    y = n_matches,
+    fill = as.factor(Assay_ID)
+  )
+) +
+  geom_col(color = "black", linewidth = 0.2) +
+  coord_flip() +
+  scale_fill_viridis_d(guide = "none") +
+  labs(
+    x = "Epitope source protein",
+    y = "Number of matches"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 9),
+    panel.grid.minor = element_blank()
+  )
+
+p_fig3
+
+rm(list = "protein_epitope_summary", "top_proteins", "plot_data")
+```
+
+```{r}
+match_df |>
+  filter(Matched) |>
+  group_by(IEDB_Protein_ID) |>
+  summarise(matches = n(),
+            n_epitopes = n_distinct(Assay_ID)) |>
+  arrange(desc(matches))
 ```

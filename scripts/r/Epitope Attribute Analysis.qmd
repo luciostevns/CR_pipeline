@@ -587,11 +587,11 @@ p_all_ep <- plot_bar(epitope_summary, Epitope_Source, n_ep_source,
 p_top20_ep <- plot_bar(top20_ep, Epitope_Source, n_ep_source,
                        x_lab = "Epitope Source Protein", y_lab = "Number of epitopes")
 
-ggsave("../final plots/epitope_source_distribution.png", p_top20_ep + p_all_ep + patchwork::plot_layout(ncol = 2), width = 16, height = 7, dpi = 300)
+#ggsave("../final plots/epitope_source_distribution.png", p_top20_ep + p_all_ep + patchwork::plot_layout(ncol = 2), width = 16, height = 7, dpi = 300)
 
 #,, Perfect Match Summary
 perfect_match_summary <- perfect_match |>
-  filter(!is.na(Matched_9mer)) |>
+  filter(Matched) |>
   group_by(Epitope_Source) |>
   summarise(n_matches = n(), .groups = "drop") |>
   left_join(epitope_summary |> select(Epitope_Source, n_ep_source), by = "Epitope_Source") |>
@@ -605,11 +605,11 @@ p_all_matches <- plot_bar(perfect_match_summary, Epitope_Source, n_matches,
                           use_log = TRUE,
                           fill_scale = scale_fill_viridis_c(option = "D", name = "Epitopes\nin IEDB"))
 
-ggsave("../final plots/perfect_match_epitope_sources.png", p_all_matches, width = 14, height = 7, dpi = 300)
+#ggsave("../final plots/perfect_match_epitope_sources.png", p_all_matches, width = 14, height = 7, dpi = 300)
 
 #,, Assay Match Frequency
 assay_summary <- perfect_match |>
-  filter(!is.na(Matched_9mer)) |>
+  filter(Matched) |>
   count(Assay_ID, Epitope_Source, Disease, name = "n_matches") |>
   group_by(Epitope_Source, Disease) |>
   mutate(total_matches = sum(n_matches)) |>
@@ -637,11 +637,11 @@ p_all_assays <- ggplot(assay_summary, aes(x = n_matches, y = reorder(Assay_ID, n
   )
 
 
-ggsave("../final plots/perfect_match_all_assays.png", p_all_assays, width = 10, height = 10, dpi = 300)
+#ggsave("../final plots/perfect_match_all_assays.png", p_all_assays, width = 10, height = 10, dpi = 300)
 
 assay_species_summary <- perfect_match |>
-  filter(!is.na(Matched_9mer)) |>
-  distinct(Assay_ID, Disease, Epitope_Source, Organism_Source) |>
+  filter(Matched) |>
+  distinct(Assay_ID, Disease, Epitope_Source, Pathogen_Organism) |>
   count(Assay_ID, Epitope_Source, Disease, name = "n_species") |>
   group_by(Epitope_Source, Disease) |>
   mutate(total_species = sum(n_species)) |>
@@ -669,7 +669,7 @@ p_species_per_epitope <- ggplot(assay_species_summary, aes(x = n_species, y = re
   )
 
 
-ggsave("../final plots/perfect_match_species_diversity.png", p_species_per_epitope, width = 10, height = 10, dpi = 300)
+#ggsave("../final plots/perfect_match_species_diversity.png", p_species_per_epitope, width = 10, height = 10, dpi = 300)
 
 
 #,, Disease summary from IEDB
@@ -699,7 +699,7 @@ p_all_diseases_horizontal <- ggplot(disease_summary_IEDB,
 disease_summary <- disease_summary_IEDB |>
   left_join(
     perfect_match |>
-      filter(!is.na(Matched_9mer)) |>
+      filter(Matched) |>
       count(Disease, name = "n_matches"),
     by = "Disease"
   ) |>
@@ -725,10 +725,10 @@ p_diseases <- ggplot(disease_summary, aes(x = reorder(Disease, n_matches), y = n
   )
 
 
-ggsave("../final plots/iedb_disease_distribution.png", p_all_diseases_horizontal, width = 16, height = 7, dpi = 300)
+#ggsave("../final plots/iedb_disease_distribution.png", p_all_diseases_horizontal, width = 16, height = 7, dpi = 300)
 
 
-ggsave("../final plots/perfect_match_disease_distribution.png", p_diseases, width = 12, height = 8, dpi = 300)
+#ggsave("../final plots/perfect_match_disease_distribution.png", p_diseases, width = 12, height = 8, dpi = 300)
 
 p_species_per_epitope
 p_diseases
