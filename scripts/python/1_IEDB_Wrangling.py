@@ -1,4 +1,3 @@
-#%%
 # Imports
 import pandas as pd
 from helpers import load_excel, save_csv, DATA_DIR
@@ -19,14 +18,24 @@ rename_dict = {
     "Epitope - Molecule Parent": "Protein_source",
     "Epitope - Molecule Parent IRI": "Protein_ID",
     "1st in vivo Process - Disease": "Disease",
-    "1st in vivo Process - Disease Stage": "Disease_stage",
-    "MHC Restriction - Name": "MHC_restriction",
     "Epitope - Starting Position": "epitope_start_pos",
-    "Epitope - Ending Position": "epitope_end_pos"
+    "Epitope - Ending Position": "epitope_end_pos",
+    "Epitope - Modified residues": "Modified_residues"
 }
 
-autoimmune_ref = autoimmune_ref.rename(columns=rename_dict)
-general_IEDB_data = general_IEDB_data.rename(columns=rename_dict)
+cols_to_keep = list(rename_dict.values())
+
+autoimmune_ref = (
+    autoimmune_ref
+    .rename(columns=rename_dict)
+    .filter(cols_to_keep)
+)
+
+general_IEDB_data = (
+    general_IEDB_data
+    .rename(columns=rename_dict)
+    .filter(cols_to_keep)
+)
 
 ################ Clean disease column ########################################
 
@@ -47,13 +56,7 @@ general_IEDB_data["Disease"] = (
 ################ Add missing autoimmune diseases #############################
 
 extra_autoimmune_diseases = {
-    "type 1 diabetes mellitus",
-    "autoimmune hemolytic anemia",
-    "primary biliary cholangitis",
-    "psoriatic arthritis",
-    "relapsing polychondritis",
-    "systemic scleroderma",
-    "Stiff-Person syndrome"
+    "type 1 diabetes mellitus"
 }
 
 extra_data = general_IEDB_data[
@@ -92,8 +95,8 @@ combined_data["Protein_ID"] = (
 ################ Filtering ###################################################
 
 combined_data_wrangled = combined_data[
-    combined_data["Epitope - Modified residues"].isna() &
-    combined_data["Sequence"].str.len().between(12, 25)
+    combined_data["Modified_residues"].isna() &
+    combined_data["Sequence"].str.len().between(12, 25, inclusive="both")
 ].copy()
 
 print(f"Dataset size after basic filtering: {len(combined_data_wrangled)}")
@@ -104,22 +107,6 @@ combined_data_wrangled = combined_data_wrangled.drop_duplicates(
 )
 
 print(f"Dataset size after removing duplicate seqs: {len(combined_data_wrangled)}")
-
-################ Select relevant columns #####################################
-
-combined_data_wrangled = combined_data_wrangled[
-    [
-        "Assay_ID",
-        "Sequence",
-        "Protein_ID",
-        "Protein_source",
-        "Disease",
-        "Disease_stage",
-        "MHC_restriction",
-        "epitope_start_pos",
-        "epitope_end_pos"
-    ]
-]
 
 ################ Nested epitope removal ######################################
 
@@ -149,7 +136,5 @@ filtered_sequences = combined_data_wrangled[
 print(f"Dataset size after removing nested epitopes: {len(filtered_sequences)}")
 
 ################ Save #########################################################
-
-print(filtered_sequences.columns.tolist())
 save_csv(filtered_sequences, DATA_DIR / "intermediate/wrangled_IEDB.csv")
-# %%
+

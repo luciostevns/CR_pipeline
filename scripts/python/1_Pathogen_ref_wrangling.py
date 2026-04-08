@@ -1,16 +1,12 @@
-print("Starting script...")
-
 import time
 import requests
 import pandas as pd
 from helpers import load_tsv, save_csv, load_tsv_robust, DATA_DIR, fetch_proteome_metadata
 
 # Pathogen reference data
-print("Loading isolates...")
 pathogen_ref = load_tsv_robust(DATA_DIR / "raw/isolates.tsv")
 
 # Proteome data
-print("Loading UniProt proteomes...")
 referenced_proteome = load_tsv(DATA_DIR / "raw/Uniprot_raw_refferenced_bacterial_proteomes.tsv")
 other_proteome = load_tsv(DATA_DIR / "raw/Uniprot_raw_unrefferenced_bacterial_proteomes.tsv")
 
@@ -21,22 +17,25 @@ proteome = pd.concat([referenced_proteome, other_proteome], ignore_index=True)
 proteome = proteome.dropna(subset=["Proteome Id", "Genome assembly ID"]).copy()
 pathogen_ref = pathogen_ref.dropna(subset=["Assembly"]).copy()
 
-# Merge proteome data onto pathogen reference by assembly
-merged = proteome.merge(
-    pathogen_ref,
-    how="left",
-    left_on="Genome assembly ID",
-    right_on="Assembly",
-    suffixes=("", "_ref")
+# Standardize ID formats for merging
+proteome["Genome assembly ID"] = (
+    proteome["Genome assembly ID"].astype(str).str.strip().str.upper()
+)
+pathogen_ref["Assembly"] = (
+    pathogen_ref["Assembly"].astype(str).str.strip().str.upper()
 )
 
-# Keep only proteomes that matched a pathogenic isolate assembly
-unique_merged = merged.dropna(subset=["Assembly"]).copy()
+# Create sets of valid IDs for filtering
+valid_assemblies = set(pathogen_ref["Assembly"])
 
-# Remove duplicate proteome IDs if present
-unique_merged = unique_merged.drop_duplicates(subset=["Proteome Id"]).copy()
+print(f"Total proteome entries before filtering: {len(proteome)}")
 
-print(f"Matched pathogenic proteomes: {len(unique_merged)}")
+# Filter proteome to only include entries with valid Genome assembly IDs
+pathogenic_proteomes = proteome[
+    proteome["Genome assembly ID"].isin(valid_assemblies)
+].copy()
+
+print(f"Proteome entries after filtering for pathogenic assemblies: {len(pathogenic_proteomes)}")
 
 # Base metadata from UniProt TSV
 proteome_metadata = unique_merged[
