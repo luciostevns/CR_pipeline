@@ -1,4 +1,3 @@
-#%%
 import pandas as pd
 import matplotlib.pyplot as plt
 from Bio import Align
@@ -89,6 +88,8 @@ iedb_seq = (
     })
 )
 
+print(f"Unique IEDB proteins with sequences: {len(iedb_seq)}")
+
 # Keep one row per unique protein-protein pair
 full_align_analysis = (
     perfect_match
@@ -109,6 +110,9 @@ full_align_analysis = (
 )
 
 print(f"Unique protein-protein pairs for alignment: {len(full_align_analysis)}")
+
+# Print unique pathogen protein IDs in the final dataset
+unique_pathogen_proteins = full_align_analysis["Pathogen_Protein_ID"].nunique
 
 # Alignment setup
 aligner = Align.PairwiseAligner()

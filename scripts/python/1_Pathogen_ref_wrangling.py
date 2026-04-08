@@ -1,6 +1,7 @@
 import time
 import requests
 import pandas as pd
+import tqdm
 from helpers import load_tsv, save_csv, load_tsv_robust, DATA_DIR, fetch_proteome_metadata
 
 # Pathogen reference data
@@ -38,7 +39,7 @@ pathogenic_proteomes = proteome[
 print(f"Proteome entries after filtering for pathogenic assemblies: {len(pathogenic_proteomes)}")
 
 # Base metadata from UniProt TSV
-proteome_metadata = unique_merged[
+proteome_metadata = pathogenic_proteomes[
     ["Proteome Id", "Genome assembly ID", "Protein count"]
 ].copy()
 
@@ -54,7 +55,7 @@ rest_metadata = []
 session = requests.Session()
 
 print("Fetching Scientific_name / Genus_species / Strain from UniProt REST...")
-for proteome_id in proteome_metadata["Proteome_ID"]:
+for proteome_id in tqdm(proteome_metadata["Proteome_ID"], desc="Fetching proteome metadata"):
     meta = fetch_proteome_metadata(proteome_id, session=session)
     rest_metadata.append(meta)
     time.sleep(0.2)

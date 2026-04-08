@@ -42,18 +42,12 @@ def parse_fasta_to_df(fasta, dataset_name):
         gene_name_match = re.search(r"GN=([^\s]+)", header)
         gene_name = gene_name_match.group(1) if gene_name_match else None
 
-        # Randomized sequence
-        seq_list = list(str(seq_record.seq))
-        random.shuffle(seq_list)
-        random_seq = "".join(seq_list)
-
         metadata.append([
             protein_id,
             proteome_id,
             annotation,
             gene_name,
-            str(seq_record.seq),
-            random_seq
+            str(seq_record.seq)
         ])
 
     metadata_df = pd.DataFrame(metadata, columns=[
@@ -61,8 +55,7 @@ def parse_fasta_to_df(fasta, dataset_name):
         "Proteome_ID",
         "Annotation",
         "Gene_name",
-        "Sequence",
-        "Random_sequence"
+        "Sequence"
     ])
 
     return metadata_df

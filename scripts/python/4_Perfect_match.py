@@ -1,4 +1,4 @@
-#%% IMPORTS
+# IMPORTS
 import pandas as pd
 import ahocorasick
 from tqdm import tqdm
@@ -43,7 +43,7 @@ def build_automaton(epitopes):
                     prot_id, sub, length,
                     start, end
                 ))
-
+   
     # Add sub-epitopes to automaton with their metadata into list, so duplicate sequences meta data doesnt get lost
     for sub, values in sub_map.items():
         A.add_word(sub, values)
@@ -53,6 +53,7 @@ def build_automaton(epitopes):
 
 print("Building automaton...")
 A = build_automaton(IEDB_epitopes)
+
 
 # Find matches between pathogen sequences and epitopes
 def find_matches(pathogen_data, automaton):
@@ -108,6 +109,7 @@ def find_matches(pathogen_data, automaton):
 
 match_df, total_matches = find_matches(pathogen_data, A)
 
+
 # keep only non-overlapping matches within each protein
 def keep_non_overlapping_hits(group: pd.DataFrame) -> pd.DataFrame:
     """
@@ -160,21 +162,6 @@ match_df = pd.concat(grouped_results, ignore_index=True)
 
 print(f"Total matches after overlap filtering: {len(match_df)}")
 
-# Random control: count matches in random sequences (should be much lower)
-def count_random_matches(pathogen_data, automaton):
-    count = 0
-
-    for seq in tqdm(pathogen_data["Random_sequence"], desc="Random control"):
-        for _ in automaton.iter(seq):
-            count += 1
-            break  # count presence only (fast)
-
-    return count
-
-
-random_matches = count_random_matches(pathogen_data, A)
-print(f"Random sequence matches: {random_matches}")
-
 # merge back with all epitopes to get full context and fill missing matches
 all_epitopes = IEDB_data[[
     "Assay_ID", "Protein_source", "Disease",
@@ -208,4 +195,3 @@ print(full_result["Matched"].value_counts(dropna=False))
 # save results
 full_result.to_csv(output_path, index=False)
 print(f"Saved results to: {output_path}")
-# %%
