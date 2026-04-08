@@ -1,5 +1,5 @@
 ---
-title: "Visualizations_analysis"
+title: "bias_analysis"
 format: html
 editor: visual
 ---
@@ -375,13 +375,4 @@ p_fig3 <- ggplot(
 p_fig3
 
 rm(list = "protein_epitope_summary", "top_proteins", "plot_data")
-```
-
-```{r}
-match_df |>
-  filter(Matched) |>
-  group_by(IEDB_Protein_ID) |>
-  summarise(matches = n(),
-            n_epitopes = n_distinct(Assay_ID)) |>
-  arrange(desc(matches))
 ```

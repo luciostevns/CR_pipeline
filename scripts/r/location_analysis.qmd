@@ -1,0 +1,114 @@
+---
+title: "location_analysis"
+format: html
+editor: visual
+---
+
+### libraries
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+### data import
+
+```{r}
+match_df <- read_csv(here("data", "proccesed", "perfect_matches_2_0.csv"))
+
+iedb_location_df <- read_csv(here("data", "raw", "deeploc_IEDB_prediction.csv"))
+
+files <- list.files(
+  path = here("data", "raw"),
+  pattern = "deeplocpro_prediction_.*\\.csv$",
+  full.names = TRUE
+)
+
+pathogen_location_df <- files |>
+  lapply(read_csv) |>
+  bind_rows()
+```
+
+### location insert
+
+```{r}
+# Define locations
+location_cols <- c(
+  "Cytoplasm",
+  "Nucleus",
+  "Extracellular",
+  "Cell membrane",
+  "Mitochondrion",
+  "Plastid",
+  "Endoplasmic reticulum",
+  "Lysosome/Vacuole",
+  "Golgi apparatus",
+  "Peroxisome"
+)
+
+# Choose location with highest propability as location
+iedb_location_df <- iedb_location_df |>
+  mutate(
+    iedb_location = location_cols[
+      max.col(as.matrix(iedb_location_df[, location_cols]), ties.method = "first")
+    ]
+  )
+
+
+# Extract clean Protein ID
+iedb_location_df <- iedb_location_df |>
+  mutate(
+    Protein_ID_clean = str_extract(Protein_ID, "(?<=sp_|tr_)[^_]+")
+  )
+
+# Add information to match_df
+match_df_location <- match_df |>
+  left_join(
+    iedb_location_df |>
+      select(Protein_ID_clean, iedb_location),
+    by = c("IEDB_Protein_ID" = "Protein_ID_clean")
+  ) |>
+  rename(iedb_location = iedb_location) |>
+  left_join(
+    pathogen_location_df |>
+      select(ACC, Localization),
+    by = c("Pathogen_Protein_ID" = "ACC"),
+    relationship = "many-to-many"
+  ) |>
+  rename(pathogen_protein_location = Localization)
+
+rm(list = "location_cols")
+```
+
+### IEDB protein locations
+
+```{r}
+match_df_location |>
+  distinct(IEDB_Protein_ID, .keep_all = TRUE) |>
+  count(iedb_location) |>
+  ggplot(aes(x = reorder(iedb_location, n), y = n)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = "IEDB Protein Localization",
+    y = "Count",
+    title = "Distribution of IEDB Protein Localizations"
+  ) +
+  theme_minimal()
+```
+
+### Pathogen protein locations
+
+```{r}
+pathogen_location_df |>
+  count(Localization) |>
+  ggplot(aes(x = reorder(Localization, n), y = n)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = "IEDB Protein Localization",
+    y = "Count",
+    title = "Distribution of IEDB Protein Localizations"
+  ) +
+  theme_minimal()
+```

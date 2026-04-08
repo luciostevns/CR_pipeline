@@ -20,25 +20,16 @@ iedb_fasta_out = DATA_DIR / "intermediate/matched_iedb_source_proteins.fasta"
 unresolved_out = DATA_DIR / "intermediate/unresolved_iedb_protein_ids.csv"
 
 # Load data
-print("Loading match file...")
+print("Loading data file...")
 match_df = load_csv(match_file)
-
-print("Loading protein metadata...")
 protein_meta = load_csv(protein_meta_file)
-
-# Filter to get only matched rows
-match_df["Matched"] = match_df["Matched"] == "True"
-matched_df = match_df[match_df["Matched"]].copy()
-
-print(f"Matched rows: {len(matched_df)}")
-print("Preparing matched pathogen proteins...")
 
 # set batch size for pathogen FASTA export
 PATHOGEN_FASTA_BATCH_SIZE = 500
 
 # Clean and extract unique matched pathogen ids
 matched_pathogen_ids = (
-    matched_df["Pathogen_Protein_ID"]
+    match_df["Pathogen_Protein_ID"]
     .map(clean_id)
     .dropna()
     .unique()
@@ -102,7 +93,7 @@ print("Preparing matched IEDB source proteins...")
 
 # Clean and extract unique matched IEDB source protein ids
 matched_iedb_ids = (
-    matched_df["IEDB_Protein_ID"]
+    match_df["IEDB_Protein_ID"]
     .map(clean_id)
     .dropna()
     .unique()
