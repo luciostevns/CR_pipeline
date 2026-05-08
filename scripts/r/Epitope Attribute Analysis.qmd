@@ -734,7 +734,7 @@ ggplot(match_matrix, aes(x = Epitope_Source, y = Pathogen_Protein_ID, fill = n_m
 ### Saving epitope attributes:
 
 ```{r}
-saveRDS(epitope_attributes, "../Data/epitope_attributes.rds")
+#saveRDS(epitope_attributes, "../Data/epitope_attributes.rds")
 ```
 
 ### Most relevant results
@@ -848,5 +848,5 @@ table_gt <- summary_table |>
 table_gt
 
 # Save the table
-gtsave(table_gt, "../final plots/Top_Candidate_Pathogen_Matches.png")
+#gtsave(table_gt, "../final plots/Top_Candidate_Pathogen_Matches.png")
 ```

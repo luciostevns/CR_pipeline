@@ -111,48 +111,67 @@ match_df, total_matches = find_matches(pathogen_data, A)
 
 
 # keep only non-overlapping matches within each protein
-def keep_non_overlapping_hits(group: pd.DataFrame) -> pd.DataFrame:
+def keep_non_overlapping_hits(group: pd.DataFrame, min_sticking_out: int = 3):
     """
-    Keeps longest matches and removes overlapping shorter ones
-    within each protein.
+    Keeps longest matches.
+    Removes a match only if the shorter of the two overlapping matches
+    sticks out by less than min_sticking_out amino acids.
     """
-    # Group values based first on match lenght, if equal then on start pos...
+
     group = group.sort_values(
         ["Match_Length", "Pathogen_Start", "Pathogen_End"],
         ascending=[False, True, True]
     )
 
     kept_rows = []
-    kept_intervals = []
+    kept_intervals = []  # stores (start, end, length)
+    removed_count = 0
 
-    # Itterate over matches in order of longest to shortest
     for _, row in group.iterrows():
         start = row["Pathogen_Start"]
         end = row["Pathogen_End"]
+        length = row["Match_Length"]
 
-        # Check if current match overlaps with any already kept match
-        overlaps = any(
-            not (end < ks or start > ke)
-            for ks, ke in kept_intervals
-        )
+        too_redundant = False
 
-        if not overlaps:
+        for ks, ke, klen in kept_intervals:
+            overlap = max(0, min(end, ke) - max(start, ks) + 1)
+
+            if overlap == 0:
+                continue
+
+            shorter_len = min(length, klen)
+            sticking_out = shorter_len - overlap
+
+            if sticking_out < min_sticking_out:
+                too_redundant = True
+                break
+
+        if not too_redundant:
             kept_rows.append(row)
-            kept_intervals.append((start, end))
+            kept_intervals.append((start, end, length))
+        else:
+            removed_count += 1
 
-    return pd.DataFrame(kept_rows)
+    return pd.DataFrame(kept_rows), removed_count
 
 print(f"Total matches before overlap filtering: {len(match_df)}")
 
-grouped_results = []
 
 # Group matches by these cols, to get relevant hits
 group_cols = ["Assay_ID", "Pathogen_Protein_ID", "Proteome_ID", "Pathogen_Organism"]
 
-for keys, group in match_df.groupby(group_cols, dropna=False, sort=False):
-    filtered_group = keep_non_overlapping_hits(group.copy())
+grouped_results = []
+total_removed = 0
 
-    # put grouping columns back 
+for keys, group in match_df.groupby(group_cols, dropna=False, sort=False):
+    filtered_group, removed = keep_non_overlapping_hits(
+        group.copy(),
+        min_sticking_out=4
+    )
+
+    total_removed += removed
+
     for col, val in zip(group_cols, keys if isinstance(keys, tuple) else (keys,)):
         filtered_group[col] = val
 
@@ -160,6 +179,7 @@ for keys, group in match_df.groupby(group_cols, dropna=False, sort=False):
 
 match_df = pd.concat(grouped_results, ignore_index=True)
 
+print(f"Total overlaps removed: {total_removed}")
 print(f"Total matches after overlap filtering: {len(match_df)}")
 
 # merge back with all epitopes to get full context and fill missing matches
