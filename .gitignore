@@ -25,3 +25,6 @@ results/
 scripts/python/iedb_old_new_analysis.py
 scripts/python/6_IEDB_pathogen_mismatch.py
 scripts/python/8_Epitope_clustering.py
+
+# R files
+.Rhistory

@@ -10,6 +10,7 @@ from helpers import (
     write_fasta_record,
     fetch_uniprot_fasta,
     parse_fasta_text,
+    gram_status
 )
 
 # Data paths
@@ -48,46 +49,87 @@ pathogen_subset = protein_meta[
 
 print(f"Matched protein-proteome entries found in protein_metadata.csv: {len(pathogen_subset)}")
 
-# Export matched pathogen proteins in batches to FASTA
-n_total = len(pathogen_subset)
-n_batches = (n_total + PATHOGEN_FASTA_BATCH_SIZE - 1) // PATHOGEN_FASTA_BATCH_SIZE
+pathogen_subset["Gram_status"] = pathogen_subset["Genus_species"].map(gram_status)
 
-# Iterate over batches and write FASTA files
-for batch_idx in range(n_batches):
-    start = batch_idx * PATHOGEN_FASTA_BATCH_SIZE
-    end = min(start + PATHOGEN_FASTA_BATCH_SIZE, n_total)
-    batch_df = pathogen_subset.iloc[start:end]
+gram_pos_df = pathogen_subset[pathogen_subset["Gram_status"] == "positive"]
+gram_neg_df = pathogen_subset[pathogen_subset["Gram_status"] == "negative"]
 
-    batch_file = DATA_DIR / "intermediate" / f"matched_pathogen_proteins_part_{batch_idx + 1:03d}.fasta"
+unknown_df = pathogen_subset[pathogen_subset["Gram_status"].isna()]
 
-    # Write batch FASTA file and include metadata in the header
-    with open(batch_file, "w", encoding="utf-8") as out:
-        for row in batch_df.itertuples(index=False):
-            protein_id = clean_id(row.Protein_ID)
-            proteome_id = clean_id(getattr(row, "Proteome_ID", None)) or "NA"
-            organism = getattr(row, "Genus_species", None)
-            organism = str(organism).strip() if pd.notna(organism) and organism else "NA"
-            annotation = getattr(row, "Annotation", None)
-            annotation = str(annotation).strip() if pd.notna(annotation) and annotation else "NA"
-            sequence = getattr(row, "Sequence", None)
+print("\nGram status counts:")
+print(pathogen_subset["Gram_status"].value_counts(dropna=False))
 
-            if pd.isna(sequence) or not protein_id:
-                continue
+if len(unknown_df) > 0:
+    print("\nUnmapped species:")
+    print(
+        unknown_df["Genus_species"]
+        .drop_duplicates()
+        .sort_values()
+        .to_string(index=False)
+    )
 
-            sequence = str(sequence).strip()
-            if not sequence:
-                continue
+def export_fasta_batches(df, prefix, batch_size=500):
+    n_total = len(df)
+    n_batches = (n_total + batch_size - 1) // batch_size
 
-            header = (
-                f"{protein_id} "
-                f"organism={organism} "
-                f"proteome={proteome_id} "
-                f"annotation={annotation}"
-            )
-            write_fasta_record(out, header, sequence)
+    print(f"\nExporting {prefix}: {n_total} proteins in {n_batches} batch(es)")
 
-    print(f"Saved pathogen FASTA batch {batch_idx + 1}/{n_batches}: {batch_file}")
+    for batch_idx in range(n_batches):
+        start = batch_idx * batch_size
+        end = min(start + batch_size, n_total)
+        batch_df = df.iloc[start:end]
 
+        batch_file = (
+            DATA_DIR / "intermediate" /
+            f"{prefix}_part_{batch_idx + 1:03d}.fasta"
+        )
+
+        with open(batch_file, "w", encoding="utf-8") as out:
+            for row in batch_df.itertuples(index=False):
+                protein_id = clean_id(row.Protein_ID)
+                proteome_id = clean_id(getattr(row, "Proteome_ID", None)) or "NA"
+
+                organism = getattr(row, "Genus_species", None)
+                organism = str(organism).strip() if pd.notna(organism) and organism else "NA"
+
+                annotation = getattr(row, "Annotation", None)
+                annotation = str(annotation).strip() if pd.notna(annotation) and annotation else "NA"
+
+                gram = getattr(row, "Gram_status", None)
+                gram = str(gram).strip() if pd.notna(gram) and gram else "NA"
+
+                sequence = getattr(row, "Sequence", None)
+
+                if pd.isna(sequence) or not protein_id:
+                    continue
+
+                sequence = str(sequence).strip()
+                if not sequence:
+                    continue
+
+                header = (
+                    f"{protein_id} "
+                    f"organism={organism} "
+                    f"proteome={proteome_id} "
+                    f"gram={gram} "
+                    f"annotation={annotation}"
+                )
+
+                write_fasta_record(out, header, sequence)
+
+        print(f"Saved {prefix} FASTA batch {batch_idx + 1}/{n_batches}: {batch_file}")
+
+export_fasta_batches(
+    gram_pos_df,
+    prefix="matched_pathogen_proteins_gram_positive",
+    batch_size=PATHOGEN_FASTA_BATCH_SIZE
+)
+
+export_fasta_batches(
+    gram_neg_df,
+    prefix="matched_pathogen_proteins_gram_negative",
+    batch_size=PATHOGEN_FASTA_BATCH_SIZE
+)
 
 print("Preparing matched IEDB source proteins...")
 

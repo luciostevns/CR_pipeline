@@ -1,7 +1,9 @@
+#%%
 import pandas as pd
 import matplotlib.pyplot as plt
 from Bio import Align
 from tqdm import tqdm
+from matplotlib.colors import LogNorm
 
 from helpers import (
     load_csv,
@@ -191,7 +193,7 @@ full_align_analysis = pd.concat([full_align_analysis, metrics], axis=1)
 summary_df = (
     full_align_analysis
     .dropna(subset=["Percent_Identity", "Coverage"])
-    .groupby("IEDB_Protein_ID")
+    .groupby(["IEDB_Protein_ID", "Epitope_Source"])
     .agg(
         Mean_Identity=("Percent_Identity", "mean"),
         SD_Identity=("Percent_Identity", "std"),
@@ -214,14 +216,14 @@ summary_df = summary_df.round(2)
 save_csv(summary_df, DATA_DIR / "proccesed/iedb_protein_similarity_summary.csv")
 
 # ---------------------- Scatter plot ---------------------- #
-
+#%%
 plt.figure(figsize=(9, 7))
 
 sc = plt.scatter(
     summary_df["Mean_Coverage"],
     summary_df["Mean_Identity"],
     c=summary_df["N_matches"],
-    norm=LogNorm(),  # <-- log scale here
+    norm=LogNorm(),
     alpha=0.85
 )
 
@@ -241,7 +243,14 @@ highlight_ids = [
     "P0DMV8",
     "P11021",
     "P01308",
-    "P62805"
+    "P62805",
+    "P38646",
+    "Q71DI3",
+    "P62807",
+    "P11021",
+    "P11142",
+    "P55087",
+    "Q05329"
 ]
 
 label_df = summary_df[summary_df["IEDB_Protein_ID"].isin(highlight_ids)]
@@ -250,13 +259,13 @@ for _, row in label_df.iterrows():
     plt.text(
         row["Mean_Coverage"] + 0.5,
         row["Mean_Identity"] + 0.5,
-        row["IEDB_Protein_ID"],
-        fontsize=9
+        row["Epitope_Source"],
+        fontsize=8
     )
 
 plt.xlabel("Mean coverage (% of shorter protein)")
 plt.ylabel("Mean percent identity (%)")
-plt.title("Average similarity of matched pathogen proteins per IEDB protein")
+
 # colorbar
 cbar = plt.colorbar(sc)
 cbar.set_label("Number of matched pathogen proteins (log scale)")

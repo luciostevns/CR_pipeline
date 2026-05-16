@@ -79,14 +79,36 @@ merged_df = all_df.merge(
     on="Proteome_ID"
 )
 
+# Remove rows without strain information
+before = len(merged_df)
+merged_df = merged_df[
+    merged_df["Strain"].notna() & (merged_df["Strain"].str.strip() != "")
+].copy()
+after = len(merged_df)
+
+print(f"Removed {before - after} rows without strain info ({(before - after)/before:.2%})")
+
 # Diagnostics
 print("\nMissing values after merge:")
 print(merged_df[["Scientific_name", "Genus_species", "Strain"]].isna().sum())
 
-print("\nUnique counts:")
-print(f"Unique Proteome_ID in FASTA: {merged_df['Proteome_ID'].nunique()}")
-print(f"Unique Genus_species: {merged_df['Genus_species'].nunique()}")
-print(f"Unique Strain: {merged_df['Strain'].nunique()}")
+print(f"\nTotal proteins(rows) {after}")
+print(f"\nTotal unique rows:\n{merged_df.nunique()}")
+
+n_unique_rows = merged_df.drop_duplicates().shape[0]
+print(f"\nUnique rows (all columns): {n_unique_rows}")
+
+dup_counts = (
+    merged_df.groupby("Sequence")
+    .agg(
+        count=("Sequence", "size"),
+        annotations=("Annotation", lambda x: list(pd.unique(x)))
+    )
+    .sort_values("count", ascending=False)
+    .reset_index()
+)
+
+print(dup_counts[["annotations", "count"]].head(10))
 
 # Save result
 print("Saving metadata to CSV...")

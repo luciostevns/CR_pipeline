@@ -109,6 +109,25 @@ def find_matches(pathogen_data, automaton):
 
 match_df, total_matches = find_matches(pathogen_data, A)
 
+print(f"Raw matches from Aho-Corasick: {len(match_df)}")
+
+duplicate_cols = [
+    "Assay_ID",
+    "IEDB_Protein_ID",
+    "Pathogen_Protein_ID",
+    "Proteome_ID",
+    "Matched_seq",
+    "Pathogen_Start",
+    "Pathogen_End"
+]
+
+n_duplicates = match_df.duplicated(subset=duplicate_cols).sum()
+
+match_df = match_df.drop_duplicates(subset=duplicate_cols).copy()
+
+print(f"Exact duplicate matches removed: {n_duplicates}")
+print(f"Matches after duplicate filtering: {len(match_df)}")
+
 
 # keep only non-overlapping matches within each protein
 def keep_non_overlapping_hits(group: pd.DataFrame, min_sticking_out: int = 3):
@@ -191,6 +210,7 @@ all_epitopes = IEDB_data[[
     "Protein_source": "Epitope_Source",
     "Protein_ID": "IEDB_Protein_ID"
 }).drop_duplicates()
+
 
 # Put back in the unmatched epitopes
 full_result = all_epitopes.merge(
