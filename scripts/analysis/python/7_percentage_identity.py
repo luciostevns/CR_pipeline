@@ -1,19 +1,11 @@
-#%%
 import pandas as pd
 import matplotlib.pyplot as plt
 from Bio import Align
 from tqdm import tqdm
 from matplotlib.colors import LogNorm
-
-from helpers import (
-    load_csv,
-    save_csv,
-    DATA_DIR,
-    RESULTS_DIR,
-    clean_id,
-    fetch_uniprot_fasta,
-    parse_fasta_text,
-)
+from crossreactivity.io import load_csv, save_csv, DATA_DIR, RESULTS_DIR, clean_id
+from crossreactivity.uniprot import fetch_uniprot_fasta
+from crossreactivity.fasta import parse_fasta_text
 
 tqdm.pandas()
 

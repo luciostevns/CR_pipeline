@@ -1,0 +1,7 @@
+filtering:
+  min_epitope_length: 12
+  max_epitope_length: 25
+
+matching:
+  overlap_min_sticking_out: 4
+  min_match_length: 9
