@@ -39,33 +39,9 @@ The pipeline integrates data from IEDB, UniProt, and NCBI to detect shared pepti
 
 ---
 
-## Project Structure
-
-```
-CR_pipeline/
-├── data/
-│   ├── raw/
-│   ├── intermediate/
-│   └── processed/
-├── results/
-│   ├── figures/
-│   └── tables/
-├── scripts/
-│   ├── python/
-│   └── r/
-├── requirements.txt
-└── README.md
-```
-
----
-
 ## Setup
 
-Clone the repository and create a virtual environment:
-
-```bash
-python -m venv .venv
-```
+Clone the repository and pip install requirements.txt
 
 ---
 
@@ -73,11 +49,11 @@ python -m venv .venv
 
 Run scripts in this order:
 
-- python 1_IEDB_Wrangling.py  
-- python 1_Pathogen_ref_wrangling.py  
-- python 2_Pathogen_fasta_retrivial.py  
-- python 3_Protein_meta_data.py  
-- python 4_Perfect_match_2_0.py  
+- python 1_iedb_wrangling.py  
+- python 1_pathogen_ref_wrangling.py  
+- python 2_pathogen_fasta_retrivial.py  
+- python 3_build_protein_metadata.py
+- python 4_Perfect_match.py  
 
 ---
 
@@ -91,7 +67,7 @@ This will filter epitope of being in specific length range (12-25) and having mo
 
 **Output:**
 - table with unique autoimmune epitopes
-- output file: "../Data/wrangled_IEDB.csv"
+- output file: "wrangled_IEDB.csv"
 
 ---
 
@@ -105,7 +81,7 @@ It will clean and filter data. It will take the uniport bacterial bulk data and 
 
 **Output:**
 - List of bacterial proteome IDs that is human pathogenic.  
-- output file: "../Data/proteome_ids.txt"
+- output file: "proteome_ids.txt"
 
 ---
 
@@ -140,7 +116,7 @@ This will in essence just get all the meta data from the bacteria included. It w
 ## 4_Perfect_match_2_0 (Weird script name i know)
 
 **Description:**  
-This is script does the main purpose of the project. The matching utilizes to main methods, to say it shortly it looks to see if the epitopes matches 1 to 1 with the pathogenic proteins. But since my epitopes can be up to 25 amino acids long, i utilize a sliding window approach that creates all possible sub epitopes down to 9mers, this results in many sub epitopes needed to be matched to a lot of proteins, so to do this within reasonable time, it utilizes an Aho-Corasick algorithm, this is a bit complicated but it sorta created a tree-structure where each branch is a sub epitope and if two sub-epitopes share a prefix they will share a branch until the differ where they branch off. there is more to it if you want to know more look at internet. Then the matching takes place where all sub-epitopes is compared to all protein, creating a lot of possible redundancy. We only want the longest match, meaning we only want 1 match per epitope, since one epitope might get matches on multiple of it sub epitopes, so we only keep the longest match per epitope-pathogen-protein pair. We also keep the pathogen proteins that did not match but flag them.
+This is script does the main purpose of the project. The matching utilizes two main methods, to say it shortly it looks to see if the epitopes matches 1 to 1 with the pathogenic proteins. But since my epitopes can be up to 25 amino acids long, i utilize a sliding window approach that creates all possible sub epitopes down to 9mers, this results in many sub epitopes needed to be matched to a lot of proteins, so to do this within reasonable time, it utilizes an Aho-Corasick algorithm, it sorta creates a tree-structure where each branch is a sub epitope and if two sub-epitopes share a prefix they will share a branch until the differ where they branch off. there is more to it if you want to know more look at internet. Then the matching takes place where all sub-epitopes is compared to all protein, creating a lot of possible redundancy. We only want the longest match, meaning we only want 1 match per epitope, since one epitope might get matches on multiple of it sub epitopes, so we only keep the longest match per epitope-pathogen-protein pair. We also keep the pathogen proteins that did not match but flag them.
 
 **Input:**
 - output from 3_Protein_meta_data (pathogen protein table) and output from 1_IEDB_Wrangling.py (Autoimmune epitope table)
