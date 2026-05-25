@@ -23,6 +23,10 @@ def load_proteome_ids() -> list[str]:
 
 
 def fetch_proteome_fasta(proteome_id: str) -> str | None:
+    """
+    Fetch the FASTA sequence for a given proteome ID from the UniProt REST API.
+    """
+
     params = {
         "format": "fasta",
         "query": f"(proteome:{proteome_id})",

@@ -79,10 +79,7 @@ def parse_fasta_to_df(fasta_records, dataset_name: str) -> pd.DataFrame:
     return metadata_df
 
 
-def merge_proteome_metadata(
-    protein_df: pd.DataFrame,
-    pathogenic_df: pd.DataFrame
-) -> pd.DataFrame:
+def merge_proteome_metadata(protein_df: pd.DataFrame, pathogenic_df: pd.DataFrame) -> pd.DataFrame:
     print("Merging in proteome-level metadata...")
 
     protein_metadata_df = protein_df.merge(
@@ -101,9 +98,7 @@ def merge_proteome_metadata(
     return protein_metadata_df
 
 
-def filter_rows_without_strain(
-    protein_metadata_df: pd.DataFrame
-) -> pd.DataFrame:
+def filter_rows_without_strain(protein_metadata_df: pd.DataFrame) -> pd.DataFrame:
     before = len(protein_metadata_df)
 
     protein_metadata_df = protein_metadata_df[

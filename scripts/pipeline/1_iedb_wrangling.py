@@ -54,6 +54,11 @@ def clean_iedb_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def remove_nested_epitopes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove nested epitopes, i.e. sequences that are fully contained
+    within another sequence from the same protein.
+    """
+
     grouped_results = []
 
     for protein_id, group in df.groupby("Protein_ID", sort=False):
@@ -97,7 +102,6 @@ def main() -> None:
     ].copy()
 
     print(f"Extra type 1 diabetes rows added: {len(extra_data)}")
-    print(extra_data["Disease"].value_counts())
 
     combined_data = pd.concat([autoimmune_ref, extra_data], ignore_index=True)
     combined_data = combined_data.drop_duplicates(subset=["Assay_ID"])

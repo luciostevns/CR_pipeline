@@ -1,5 +1,3 @@
-
-
 def parse_fasta_text(fasta_text: str) -> tuple[str, str] | None:
     if not fasta_text:
         return None

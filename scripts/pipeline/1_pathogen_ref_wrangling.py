@@ -4,12 +4,7 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
-from crossreactivity.io import (
-    DATA_DIR,
-    load_tsv,
-    load_tsv_robust,
-    save_csv
-)
+from crossreactivity.io import (DATA_DIR, load_tsv, load_tsv_robust, save_csv)
 from crossreactivity.uniprot import fetch_proteome_metadata
 
 
@@ -32,10 +27,7 @@ def load_input_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     return pathogen_ref, proteome
 
 
-def clean_merge_ids(
-    pathogen_ref: pd.DataFrame,
-    proteome: pd.DataFrame
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def clean_merge_ids(pathogen_ref: pd.DataFrame, proteome: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     proteome = proteome.dropna(
         subset=["Proteome Id", "Genome assembly ID"]
@@ -62,10 +54,11 @@ def clean_merge_ids(
     return pathogen_ref, proteome
 
 
-def filter_pathogenic_proteomes(
-    pathogen_ref: pd.DataFrame,
-    proteome: pd.DataFrame
-) -> pd.DataFrame:
+def filter_pathogenic_proteomes(pathogen_ref: pd.DataFrame, proteome: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filter the proteome metadata to include only entries that correspond to
+    pathogenic bacteria based on the reference dataset.
+    """
 
     valid_assemblies = set(pathogen_ref["Assembly"])
 
@@ -76,9 +69,7 @@ def filter_pathogenic_proteomes(
     return pathogenic_proteomes
 
 
-def make_base_proteome_metadata(
-    pathogenic_proteomes: pd.DataFrame
-) -> pd.DataFrame:
+def make_base_proteome_metadata(pathogenic_proteomes: pd.DataFrame) -> pd.DataFrame:
 
     proteome_metadata = pathogenic_proteomes[
         ["Proteome Id", "Genome assembly ID", "Protein count"]
@@ -95,9 +86,11 @@ def make_base_proteome_metadata(
     return proteome_metadata
 
 
-def fetch_all_proteome_metadata(
-    proteome_ids: pd.Series
-) -> pd.DataFrame:
+def fetch_all_proteome_metadata(proteome_ids: pd.Series) -> pd.DataFrame:
+    """
+    Fetch Scientific_name, Genus_species, and Strain metadata
+    for all proteomes using the UniProt REST API.
+    """
 
     rest_metadata = []
     session = requests.Session()

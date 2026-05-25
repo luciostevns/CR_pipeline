@@ -34,6 +34,11 @@ def prepare_epitopes(iedb_data: pd.DataFrame) -> list[tuple]:
 
 
 def build_automaton(epitopes: list[tuple]) -> ahocorasick.Automaton:
+    """
+    Build an Aho-Corasick automaton for efficient multi-pattern matching of epitope sequences.
+    Each epitope is added to the automaton with associated metadata for later retrieval.
+    """
+
     min_match_len = config["matching"]["min_match_length"]
 
     automaton = ahocorasick.Automaton()
@@ -65,10 +70,13 @@ def build_automaton(epitopes: list[tuple]) -> ahocorasick.Automaton:
     return automaton
 
 
-def find_matches(
-    pathogen_data: pd.DataFrame,
-    automaton: ahocorasick.Automaton
-) -> pd.DataFrame:
+def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) -> pd.DataFrame:
+    """
+    Use the Aho-Corasick automaton to find all matches of epitope sequences within 
+    the pathogen protein sequences. Each match is recorded with associated metadata
+    from both the pathogen data and the epitope data.
+    """
+    
     matches = []
 
     print("Matching sequences...")
@@ -150,19 +158,10 @@ def find_matches(
 
 
 def remove_exact_duplicate_matches(match_df: pd.DataFrame) -> pd.DataFrame:
-    duplicate_cols = [
-        "Assay_ID",
-        "IEDB_Protein_ID",
-        "Pathogen_Protein_ID",
-        "Proteome_ID",
-        "Matched_seq",
-        "Pathogen_Start",
-        "Pathogen_End",
-    ]
 
-    n_duplicates = match_df.duplicated(subset=duplicate_cols).sum()
+    n_duplicates = match_df.duplicated().sum()
 
-    match_df = match_df.drop_duplicates(subset=duplicate_cols).copy()
+    match_df = match_df.drop_duplicates().copy()
 
     print(f"Exact duplicate matches removed: {n_duplicates}")
     print(f"Matches after duplicate filtering: {len(match_df)}")
@@ -170,12 +169,8 @@ def remove_exact_duplicate_matches(match_df: pd.DataFrame) -> pd.DataFrame:
     return match_df
 
 
-def keep_non_overlapping_hits(
-    group: pd.DataFrame,
-    min_sticking_out: int
-) -> tuple[pd.DataFrame, int]:
+def keep_non_overlapping_hits(group: pd.DataFrame, min_sticking_out: int) -> tuple[pd.DataFrame, int]:
     """
-    Keeps longest matches.
     Removes a match only if the shorter of the two overlapping matches
     sticks out by less than min_sticking_out amino acids.
     """
@@ -221,6 +216,12 @@ def keep_non_overlapping_hits(
 
 
 def remove_overlapping_matches(match_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove overlapping within defined groups of matches
+    based on the criteria defined in keep_non_overlapping_hits.
+
+    """
+
     min_sticking_out = config["matching"]["overlap_min_sticking_out"]
 
     print(f"Total matches before overlap filtering: {len(match_df)}")
@@ -259,10 +260,7 @@ def remove_overlapping_matches(match_df: pd.DataFrame) -> pd.DataFrame:
     return match_df
 
 
-def add_unmatched_epitopes(
-    match_df: pd.DataFrame,
-    iedb_data: pd.DataFrame
-) -> pd.DataFrame:
+def add_unmatched_epitopes(match_df: pd.DataFrame, iedb_data: pd.DataFrame) -> pd.DataFrame:
     all_epitopes = (
         iedb_data[
             [

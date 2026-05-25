@@ -1,6 +1,5 @@
 from pathlib import Path
 import pandas as pd
-import requests
 
 # Project paths
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -45,7 +44,6 @@ def load_csv(path, **kwargs):
         **kwargs
     )
 
-
 def load_tsv(path, **kwargs):
     path = Path(path)
     if not path.exists():
@@ -77,8 +75,6 @@ def save_csv(df, path, **kwargs):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, **kwargs)
-
-    import requests
 
 def clean_id(x: str) -> str | None:
     if pd.isna(x):
