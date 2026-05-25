@@ -57,7 +57,7 @@ Run scripts in this order:
 
 ---
 
-## 1_IEDB_Wrangling.py
+## 1_iedb_wrangling.py
 
 **Description:**  
 This will filter epitope of being in specific length range (12-25) and having modified residues. to reduce redundancy in epitope list the script will check if smaller epitopes exist within other longer epitopes (nested epitopes), it will do this by creating all possible 9mers for each epitope if 2 epitopes are identical it will remove the parent epitope of the 9mer that is smallest. It will then write a .csv file, with chosen columns as columns and each row being a 9mer.
@@ -71,7 +71,7 @@ This will filter epitope of being in specific length range (12-25) and having mo
 
 ---
 
-## 1_Pathogen_ref_wrangling
+## 1_pathogen_ref_wrangling
 
 **Description:**  
 It will clean and filter data. It will take the uniport bacterial bulk data and check how many of them have been confirmed to be pathogenic against humans, it will do this with the ncbi isolates data by cross-referencing their assembly ID.
@@ -85,7 +85,7 @@ It will clean and filter data. It will take the uniport bacterial bulk data and 
 
 ---
 
-## 2_Pathogen_fasta_retrivial
+## 2_pathogen_fasta_retrivial
 
 **Description:**  
 A rest api to retrive the full fasta proteomes of the bacteria.
@@ -95,14 +95,14 @@ A rest api to retrive the full fasta proteomes of the bacteria.
 
 **Output:**
 - 1 fasta file with all bacterial proteomes  
-- output file: "all_fastas.fasta"
+- output file: "all_proteomes.fasta"
 
 ---
 
-## 3_Protein_meta_data
+## 3_build_protein_metadata
 
 **Description:**  
-This will in essence just get all the meta data from the bacteria included. It will be each protein in the fastafiles metadata, so which Genus-species-strain each protein comes from, protein annotation, gene name, sequence and protein_ID.
+This will in essence just get all the meta data from the bacterias. For each protein it will retrieve metadata from the FASTA files and uniprot, so which Genus-species-strain each protein comes from, protein annotation, gene name, sequence and protein_ID.
 
 **Input:**
 - Output from 2_Pathogen_fasta_retrivial (bacterial proteomes fasta)
@@ -113,7 +113,7 @@ This will in essence just get all the meta data from the bacteria included. It w
 
 ---
 
-## 4_Perfect_match_2_0 (Weird script name i know)
+## 4_Perfect_match
 
 **Description:**  
 This is script does the main purpose of the project. The matching utilizes two main methods, to say it shortly it looks to see if the epitopes matches 1 to 1 with the pathogenic proteins. But since my epitopes can be up to 25 amino acids long, i utilize a sliding window approach that creates all possible sub epitopes down to 9mers, this results in many sub epitopes needed to be matched to a lot of proteins, so to do this within reasonable time, it utilizes an Aho-Corasick algorithm, it sorta creates a tree-structure where each branch is a sub epitope and if two sub-epitopes share a prefix they will share a branch until the differ where they branch off. there is more to it if you want to know more look at internet. Then the matching takes place where all sub-epitopes is compared to all protein, creating a lot of possible redundancy. We only want the longest match, meaning we only want 1 match per epitope, since one epitope might get matches on multiple of it sub epitopes, so we only keep the longest match per epitope-pathogen-protein pair. We also keep the pathogen proteins that did not match but flag them.
