@@ -19,7 +19,6 @@ The pipeline integrates data from IEDB, UniProt, and NCBI to detect shared pepti
   - Protein source
   - Protein ID
   - Disease
-  - Disease stage
   - MHC restriction
   - Epitope start/end positions
   - Modified residues
