@@ -23,10 +23,13 @@ def prepare_epitopes(iedb_data: pd.DataFrame) -> list[tuple]:
             iedb_data["Assay_ID"],
             iedb_data["Protein_source"],
             iedb_data["Disease"],
+            iedb_data["Disease_stage"],
             iedb_data["Protein_ID"],
             iedb_data["Sequence"],
             iedb_data["epitope_start_pos"],
             iedb_data["epitope_end_pos"],
+            iedb_data["Response_measured"],
+            iedb_data["Effector_cell"],
         )
     )
 
@@ -44,9 +47,14 @@ def build_automaton(epitopes: list[tuple]) -> ahocorasick.Automaton:
     automaton = ahocorasick.Automaton()
     sub_map = defaultdict(list)
 
-    for assay_id, source, disease, prot_id, epitope, start, end in epitopes:
+    total_kmers = 0
+
+    for assay_id, source, disease, disease_stage, prot_id, epitope, start, end, response, effector_cell in epitopes:
         for length in range(len(epitope), min_match_len - 1, -1):
             for i in range(len(epitope) - length + 1):
+
+                total_kmers += 1
+
                 sub = epitope[i:i + length]
 
                 sub_map[sub].append(
@@ -54,11 +62,14 @@ def build_automaton(epitopes: list[tuple]) -> ahocorasick.Automaton:
                         assay_id,
                         source,
                         disease,
+                        disease_stage,
                         prot_id,
                         sub,
                         length,
                         start,
                         end,
+                        response,
+                        effector_cell,
                     )
                 )
 
@@ -66,6 +77,8 @@ def build_automaton(epitopes: list[tuple]) -> ahocorasick.Automaton:
         automaton.add_word(sub, values)
 
     automaton.make_automaton()
+
+    print(f"Total k-mers added to automaton: {total_kmers}")
 
     return automaton
 
@@ -99,11 +112,14 @@ def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) 
                 assay_id,
                 source,
                 disease,
+                disease_stage,
                 ep_prot_id,
                 sub,
                 match_len,
                 ep_start,
                 ep_end,
+                response,
+                effector_cell
             ) in hit_list:
 
                 match_start = end_idx - match_len + 2  # 1-based
@@ -114,6 +130,7 @@ def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) 
                         assay_id,
                         source,
                         disease,
+                        disease_stage,
                         ep_prot_id,
                         pid,
                         proteome_id,
@@ -128,6 +145,8 @@ def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) 
                         match_end,
                         ep_start,
                         ep_end,
+                        response,
+                        effector_cell
                     )
                 )
 
@@ -137,6 +156,7 @@ def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) 
             "Assay_ID",
             "Epitope_Source",
             "Disease",
+            "Disease_stage",
             "IEDB_Protein_ID",
             "Pathogen_Protein_ID",
             "Proteome_ID",
@@ -151,6 +171,8 @@ def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) 
             "Pathogen_End",
             "Epitope_Start",
             "Epitope_End",
+            "Response_measured",
+            "Effector_cell"
         ],
     )
 
@@ -267,10 +289,13 @@ def add_unmatched_epitopes(match_df: pd.DataFrame, iedb_data: pd.DataFrame) -> p
                 "Assay_ID",
                 "Protein_source",
                 "Disease",
+                "Disease_stage",
                 "Protein_ID",
                 "Sequence",
                 "epitope_start_pos",
                 "epitope_end_pos",
+                "Response_measured",
+                "Effector_cell"
             ]
         ]
         .rename(
@@ -285,12 +310,14 @@ def add_unmatched_epitopes(match_df: pd.DataFrame, iedb_data: pd.DataFrame) -> p
     full_result = all_epitopes.merge(
         match_df,
         how="left",
-        on=[
-            "Assay_ID",
+        on=["Assay_ID",
             "Epitope_Source",
             "Disease",
+            "Disease_stage",
             "IEDB_Protein_ID",
-        ],
+            "Response_measured",
+            "Effector_cell"
+        ]
     )
 
     full_result["Matched"] = ~full_result["Pathogen_Protein_ID"].isna()

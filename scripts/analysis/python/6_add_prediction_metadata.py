@@ -53,8 +53,8 @@ def load_prediction_inputs():
     )
 
     print("Loading NetSurfP IEDB predictions...")
-    netsurfp_iedb = read_netsurfp_file(
-        netsurfp_dir / "netsurfp_IEDB_prediction.csv"
+    netsurfp_iedb_files = sorted(
+        netsurfp_dir.glob("netsurfp_IEDB_prediction_*.csv")
     )
 
     print("Loading NetSurfP pathogen predictions...")
@@ -64,6 +64,11 @@ def load_prediction_inputs():
 
     netsurfp_pathogen = pd.concat(
         [read_netsurfp_file(file) for file in netsurfp_pathogen_files],
+        ignore_index=True
+    )
+
+    netsurfp_iedb = pd.concat(
+        [read_netsurfp_file(file) for file in netsurfp_iedb_files],
         ignore_index=True
     )
 

@@ -1,11 +1,11 @@
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
+from adjustText import adjust_text
 from Bio import Align
 from tqdm import tqdm
 from matplotlib.colors import LogNorm
-from crossreactivity.io import load_csv, save_csv, DATA_DIR, RESULTS_DIR, clean_id
-from crossreactivity.uniprot import fetch_uniprot_fasta
-from crossreactivity.fasta import parse_fasta_text
+from crossreactivity.io import load_csv, save_csv, DATA_DIR, clean_id
 
 tqdm.pandas()
 
@@ -30,23 +30,56 @@ pathogen_data["Protein_ID"] = pathogen_data["Protein_ID"].map(clean_id)
 perfect_match = perfect_match.dropna(subset=["Pathogen_Protein_ID", "IEDB_Protein_ID"]).copy()
 pathogen_data = pathogen_data.dropna(subset=["Protein_ID"]).copy()
 
+
 # Fetch matched IEDB source protein sequences
 def fetch_iedb_sequences(uniprot_ids):
+    fasta_path = DATA_DIR / "intermediate" / "matched_iedb_source_proteins.fasta"
+    
+    if not fasta_path.exists():
+        raise FileNotFoundError(f"FASTA file not found: {fasta_path}")
+    
     rows = []
-
-    for protein_id in tqdm(uniprot_ids, desc="Fetching IEDB UniProt sequences", unit="protein"):
-        fasta_text = fetch_uniprot_fasta(protein_id)
-        parsed = parse_fasta_text(fasta_text) if fasta_text else None
-
-        if parsed is None:
-            continue
-
-        _, seq = parsed
-        rows.append({
-            "Protein_ID": protein_id,
-            "IEDB_Sequence": seq
-        })
-
+    
+    # Read the FASTA file
+    with open(fasta_path, 'r') as f:
+        fasta_content = f.read()
+    
+    # Split by header lines (lines starting with ">")
+    entries = []
+    current_header = None
+    current_seq = []
+    
+    for line in fasta_content.splitlines():
+        if line.startswith(">"):
+            if current_header is not None:
+                entries.append((current_header, "".join(current_seq)))
+            current_header = line[1:].strip()
+            current_seq = []
+        else:
+            current_seq.append(line.strip())
+    
+    # Don't forget the last entry
+    if current_header is not None:
+        entries.append((current_header, "".join(current_seq)))
+    
+    # Match entries to requested uniprot_ids
+    for protein_id in tqdm(uniprot_ids, desc="Loading IEDB UniProt sequences", unit="protein"):
+        for header, seq in entries:
+            # Extract protein ID from different header formats
+            if "|" in header:
+                # UniProt format: sp|PROTEINID|... or tr|PROTEINID|...
+                extracted_id = header.split("|")[1]
+            else:
+                # Simple format: PROTEINID other_info
+                extracted_id = header.split()[0]
+            
+            if protein_id == extracted_id:
+                rows.append({
+                    "Protein_ID": protein_id,
+                    "IEDB_Sequence": seq
+                })
+                break
+    
     return pd.DataFrame(rows)
 
 
@@ -242,18 +275,23 @@ highlight_ids = [
     "P11021",
     "P11142",
     "P55087",
-    "Q05329"
+    "Q05329",
+    "P06733"
 ]
 
 label_df = summary_df[summary_df["IEDB_Protein_ID"].isin(highlight_ids)]
 
+texts = []
 for _, row in label_df.iterrows():
-    plt.text(
-        row["Mean_Coverage"] + 0.5,
-        row["Mean_Identity"] + 0.5,
+    txt = plt.text(
+        row["Mean_Coverage"],
+        row["Mean_Identity"],
         row["Epitope_Source"],
         fontsize=8
     )
+    texts.append(txt)
+
+adjust_text(texts, arrowprops=dict(arrowstyle='->', color='gray', lw=0.5))
 
 plt.xlabel("Mean coverage (% of shorter protein)")
 plt.ylabel("Mean percent identity (%)")

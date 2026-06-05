@@ -1,0 +1,125 @@
+---
+title: "GO_enrichment"
+format: html
+---
+
+# Gene ontology Enrichment Analysis
+
+### Libraries
+
+```{r}
+library(tidyverse)
+library(openxlsx)
+library("here")
+library(janitor)
+library(stringr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+```
+
+### Data Import
+
+```{r}
+background <- read.xlsx(
+    here("data", "raw", "IEDB_epitop_assays_raw.xlsx"),
+    sheet = 1,
+    startRow = 2
+) |>
+  clean_names()
+
+background <- background[, !duplicated(names(background))]
+
+autoimunne <- read_csv(here("data", "proccesed",
+                            "perfect_match_DN_add.csv"),
+                       show_col_types = FALSE)
+```
+
+### Data wrangling
+
+```{r}
+background_prots <- background |>
+  dplyr::rename(protein_ID = "molecule_parent_iri") |>
+  pull(protein_ID) |>
+  str_extract("[A-Z0-9]+$") |>
+  unique()
+
+foreground_prots <- autoimunne |>
+  pull(IEDB_Protein_ID) |>
+  unique()
+
+background_prots <- background_prots[!is.na(background_prots)]
+foreground_prots <- foreground_prots[!is.na(foreground_prots)]
+
+sum(foreground_prots %in% background_prots)
+length(foreground_prots)
+```
+
+### Map uniprot to ENTREZ
+
+```{r}
+foreground_map <- bitr(
+    foreground_prots,
+    fromType = "UNIPROT",
+    toType = c("ENTREZID", "SYMBOL"),
+    OrgDb = org.Hs.eg.db
+)
+
+background_map <- bitr(
+    background_prots,
+    fromType = "UNIPROT",
+    toType = c("ENTREZID", "SYMBOL"),
+    OrgDb = org.Hs.eg.db
+)
+
+nrow(foreground_map)
+length(foreground_prots)
+
+nrow(background_map)
+length(background_prots)
+```
+
+### GO enrichment
+
+```{r}
+ego_bp <- enrichGO(
+    gene          = foreground_map$ENTREZID,
+    universe      = background_map$ENTREZID,
+    OrgDb         = org.Hs.eg.db,
+    ont           = "BP",
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.05,
+    qvalueCutoff  = 0.05,
+    readable      = TRUE
+)
+
+results_bp <- as.data.frame(ego_bp)
+```
+
+### Interpret results
+
+```{r}
+results_bp |>
+  dplyr::arrange(p.adjust) |>
+  dplyr::select(
+    Description,
+    GeneRatio,
+    BgRatio,
+    Count,
+    p.adjust
+  ) |>
+  head(20)
+```
+
+### Simplefy
+
+```{r}
+ego_bp_simple <- simplify(
+    ego_bp,
+    cutoff = 0.7,
+    by = "p.adjust",
+    select_fun = min
+)
+
+dotplot(ego_bp_simple, showCategory = 15)
+```
