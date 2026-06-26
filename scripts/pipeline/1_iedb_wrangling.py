@@ -17,7 +17,8 @@ def standardize_iedb_columns(df: pd.DataFrame) -> pd.DataFrame:
         "Epitope - Ending Position": "epitope_end_pos",
         "Epitope - Modified residues": "Modified_residues",
         "Assay - Response measured": "Response_measured",
-        "Effector Cell - Name": "Effector_cell"
+        "Effector Cell - Name": "Effector_cell",
+        "MHC Restriction - Name": "MHC_restriction"
     }
 
     cols_to_keep = list(rename_dict.values())
@@ -88,7 +89,7 @@ def remove_nested_epitopes(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> None:
-    iedb_df = pd.read_csv(DATA_DIR / "raw" / "iedb_data.csv")
+    iedb_df = pd.read_csv(DATA_DIR / "raw" / "tcell_table_export_1781203145.csv")
 
     print(f"IEDB dataset size: {len(iedb_df)}")
 

@@ -1,9 +1,12 @@
+import shutil
+import subprocess
+
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
 from adjustText import adjust_text
-from Bio import Align, SeqIO
-from Bio.Align import substitution_matrices
+from Bio import SeqIO
 from tqdm import tqdm
 from matplotlib.colors import LogNorm
 
@@ -59,6 +62,114 @@ def ensure_iedb_fasta_exists(fasta_path, protein_ids):
 
     if failed:
         print(f"Warning: failed to fetch {len(failed)} proteins from UniProt.")
+
+
+def check_blast_installed():
+    missing = [cmd for cmd in ["makeblastdb", "blastp"] if shutil.which(cmd) is None]
+
+    if missing:
+        raise RuntimeError(
+            f"Missing BLAST+ command(s): {', '.join(missing)}. "
+            "Install BLAST+ and make sure it is available in PATH."
+        )
+
+
+def write_fasta(df, id_col, seq_col, output_path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    clean_df = (
+        df[[id_col, seq_col]]
+        .dropna()
+        .drop_duplicates(subset=[id_col])
+    )
+
+    with open(output_path, "w") as f:
+        for _, row in clean_df.iterrows():
+            protein_id = str(row[id_col]).strip()
+            sequence = str(row[seq_col]).replace(" ", "").replace("\n", "").strip()
+
+            if not protein_id or not sequence:
+                continue
+
+            f.write(f">{protein_id}\n")
+
+            for i in range(0, len(sequence), 80):
+                f.write(sequence[i:i + 80] + "\n")
+
+    print(f"Wrote {len(clean_df)} sequences to {output_path}")
+
+
+def run_blastp(query_fasta, subject_fasta, db_prefix, output_tsv, num_threads=4):
+    check_blast_installed()
+
+    db_prefix.parent.mkdir(parents=True, exist_ok=True)
+    output_tsv.parent.mkdir(parents=True, exist_ok=True)
+
+    print("Building BLAST database...")
+
+    subprocess.run(
+        [
+            "makeblastdb",
+            "-in", str(subject_fasta),
+            "-dbtype", "prot",
+            "-out", str(db_prefix),
+            "-parse_seqids"
+        ],
+        check=True
+    )
+
+    outfmt = (
+        "6 qseqid sseqid pident length mismatch gapopen "
+        "qstart qend sstart send evalue bitscore qlen slen qcovs"
+    )
+
+    print("Running BLASTp...")
+
+    subprocess.run(
+        [
+            "blastp",
+            "-query", str(query_fasta),
+            "-db", str(db_prefix),
+            "-out", str(output_tsv),
+            "-outfmt", outfmt,
+            "-evalue", "10",
+            "-max_hsps", "1",
+            "-num_threads", str(num_threads)
+        ],
+        check=True
+    )
+
+
+def load_blast_results(blast_tsv):
+    cols = [
+        "IEDB_Protein_ID",
+        "Pathogen_Protein_ID",
+        "Percent_Identity",
+        "Alignment_Length",
+        "Mismatches",
+        "Gap_Openings",
+        "Query_Start",
+        "Query_End",
+        "Subject_Start",
+        "Subject_End",
+        "Evalue",
+        "Bit_Score",
+        "Query_Length",
+        "Subject_Length",
+        "Query_Coverage"
+    ]
+
+    if not blast_tsv.exists() or blast_tsv.stat().st_size == 0:
+        print("Warning: BLASTp output is empty.")
+        return pd.DataFrame(columns=cols + ["Subject_Coverage"])
+
+    blast_df = pd.read_csv(blast_tsv, sep="\t", names=cols)
+
+    blast_df["Subject_Coverage"] = (
+        (blast_df["Subject_End"] - blast_df["Subject_Start"]).abs() + 1
+    ) / blast_df["Subject_Length"] * 100
+
+    return blast_df
 
 
 # ---------------------- Load data ---------------------- #
@@ -149,7 +260,7 @@ iedb_seq = (
 print(f"Unique IEDB proteins with sequences: {len(iedb_seq)}")
 
 
-# ---------------------- Build full alignment table ---------------------- #
+# ---------------------- Build full protein-pair table ---------------------- #
 
 full_align_analysis = (
     perfect_match
@@ -169,168 +280,147 @@ full_align_analysis = (
     .drop(columns=["Pathogen_Protein_ID_merge", "IEDB_Protein_ID_merge"])
 )
 
-print(f"Unique protein-protein pairs for alignment: {len(full_align_analysis)}")
-
-unique_pathogen_proteins = full_align_analysis["Pathogen_Protein_ID"].nunique()
-print(f"Unique pathogen proteins: {unique_pathogen_proteins}")
+print(f"Unique IEDB-pathogen protein pairs: {len(full_align_analysis)}")
+print(f"Unique pathogen proteins: {full_align_analysis['Pathogen_Protein_ID'].nunique()}")
 
 
-# ---------------------- Alignment setup ---------------------- #
+# ---------------------- Write FASTA files for BLASTp ---------------------- #
 
-aligner = Align.PairwiseAligner()
-aligner.mode = "global"
-aligner.substitution_matrix = substitution_matrices.load("BLOSUM62")  # leave gap scores as Biopython defaults
+blast_dir = DATA_DIR / "intermediate" / "blastp_similarity"
+iedb_blast_fasta = blast_dir / "iedb_source_proteins.fasta"
+pathogen_blast_fasta = blast_dir / "matched_pathogen_proteins.fasta"
+pathogen_db_prefix = blast_dir / "matched_pathogen_db"
+blast_output = blast_dir / "iedb_vs_pathogen_blastp.tsv"
 
-metric_cols = [
-    "Percent_Identity",
-    "Alignment_Length",
-    "Matches",
-    "Mismatches",
-    "Gap_Count",
-    "Alignment_Score",
-    "Normalized_Alignment_Score",
-    "Query_Coverage",
-    "Subject_Coverage"
-]
-
-
-def empty_alignment_metrics():
-    return pd.Series({col: None for col in metric_cols})
-
-
-def compute_alignment_metrics(seq1, seq2):
-    if pd.isna(seq1) or pd.isna(seq2):
-        return empty_alignment_metrics()
-
-    seq1, seq2 = str(seq1).strip(), str(seq2).strip()
-
-    if not seq1 or not seq2:
-        return empty_alignment_metrics()
-
-    try:
-        best = aligner.align(seq1, seq2)[0]
-    except Exception:
-        return empty_alignment_metrics()
-
-    matches = mismatches = gap_count = aligned_pairs = alignment_length = 0
-    query_positions, subject_positions = set(), set()
-    coords = best.coordinates
-
-    for i in range(coords.shape[1] - 1):
-        start1, end1 = coords[0, i], coords[0, i + 1]
-        start2, end2 = coords[1, i], coords[1, i + 1]
-
-        len1 = end1 - start1
-        len2 = end2 - start2
-
-        if len1 > 0 and len2 > 0:
-            segment1 = seq1[start1:end1]
-            segment2 = seq2[start2:end2]
-
-            query_positions.update(range(start1, end1))
-            subject_positions.update(range(start2, end2))
-
-            aligned_pairs += len(segment1)
-            alignment_length += len(segment1)
-
-            for a, b in zip(segment1, segment2):
-                if a == b:
-                    matches += 1
-                else:
-                    mismatches += 1
-
-        else:
-            gap_len = max(len1, len2)
-            gap_count += gap_len
-            alignment_length += gap_len
-
-    percent_identity = (matches / alignment_length) * 100 if alignment_length else 0.0
-    query_coverage = (len(query_positions) / len(seq1)) * 100
-    subject_coverage = (len(subject_positions) / len(seq2)) * 100
-
-    raw_score = best.score
-    self_score_1 = aligner.score(seq1, seq1)
-    self_score_2 = aligner.score(seq2, seq2)
-    max_possible_score = min(self_score_1, self_score_2)
-
-    normalized_score = (
-        raw_score / max_possible_score
-        if max_possible_score and max_possible_score > 0
-        else None
-    )
-
-    return pd.Series({
-        "Percent_Identity": percent_identity,
-        "Alignment_Length": alignment_length,
-        "Matches": matches,
-        "Mismatches": mismatches,
-        "Gap_Count": gap_count,
-        "Alignment_Score": raw_score,
-        "Normalized_Alignment_Score": normalized_score,
-        "Query_Coverage": query_coverage,
-        "Subject_Coverage": subject_coverage
-    })
-
-
-# ---------------------- Compute global alignment metrics ---------------------- #
-
-print("Computing global alignment metrics...")
-
-metrics = full_align_analysis.progress_apply(
-    lambda row: compute_alignment_metrics(
-        row["IEDB_Sequence"],
-        row["Pathogen_Sequence"]
-    ),
-    axis=1
+iedb_fasta_df = (
+    full_align_analysis[["IEDB_Protein_ID", "IEDB_Sequence"]]
+    .dropna()
+    .drop_duplicates(subset=["IEDB_Protein_ID"])
 )
 
-full_align_analysis = pd.concat([full_align_analysis, metrics], axis=1)
+pathogen_fasta_df = (
+    full_align_analysis[["Pathogen_Protein_ID", "Pathogen_Sequence"]]
+    .dropna()
+    .drop_duplicates(subset=["Pathogen_Protein_ID"])
+)
+
+write_fasta(
+    iedb_fasta_df,
+    id_col="IEDB_Protein_ID",
+    seq_col="IEDB_Sequence",
+    output_path=iedb_blast_fasta
+)
+
+write_fasta(
+    pathogen_fasta_df,
+    id_col="Pathogen_Protein_ID",
+    seq_col="Pathogen_Sequence",
+    output_path=pathogen_blast_fasta
+)
+
+
+# ---------------------- Run BLASTp ---------------------- #
+
+run_blastp(
+    query_fasta=iedb_blast_fasta,
+    subject_fasta=pathogen_blast_fasta,
+    db_prefix=pathogen_db_prefix,
+    output_tsv=blast_output,
+    num_threads=4
+)
+
+blast_df = load_blast_results(blast_output)
+
+print(f"BLASTp alignments returned: {len(blast_df)}")
+
+
+# ---------------------- Keep only original matched protein pairs ---------------------- #
+
+pair_table = (
+    full_align_analysis[["IEDB_Protein_ID", "Pathogen_Protein_ID", "Epitope_Source"]]
+    .drop_duplicates()
+)
+
+blast_matched_pairs = pair_table.merge(
+    blast_df,
+    how="left",
+    on=["IEDB_Protein_ID", "Pathogen_Protein_ID"]
+)
+
+blast_matched_pairs["Has_BLAST_Hit"] = blast_matched_pairs["Bit_Score"].notna()
+
+print(
+    f"Matched protein pairs with BLASTp hit: "
+    f"{blast_matched_pairs['Has_BLAST_Hit'].sum()} / {len(blast_matched_pairs)}"
+)
+
+save_csv(
+    blast_matched_pairs,
+    DATA_DIR / "proccesed/iedb_pathogen_blastp_pair_results.csv"
+)
 
 
 # ---------------------- Summary table ---------------------- #
 
 summary_df = (
-    full_align_analysis
-    .dropna(subset=["Percent_Identity", "Normalized_Alignment_Score"])
+    blast_matched_pairs
     .groupby(["IEDB_Protein_ID", "Epitope_Source"])
     .agg(
         Mean_Identity=("Percent_Identity", "mean"),
         SD_Identity=("Percent_Identity", "std"),
-        Mean_Normalized_Alignment_Score=("Normalized_Alignment_Score", "mean"),
-        SD_Normalized_Alignment_Score=("Normalized_Alignment_Score", "std"),
         Mean_Query_Coverage=("Query_Coverage", "mean"),
+        SD_Query_Coverage=("Query_Coverage", "std"),
         Mean_Subject_Coverage=("Subject_Coverage", "mean"),
         Mean_Alignment_Length=("Alignment_Length", "mean"),
-        Mean_Gap_Count=("Gap_Count", "mean"),
-        N_matches=("IEDB_Protein_ID", "count")
+        Best_Evalue=("Evalue", "min"),
+        Best_Bit_Score=("Bit_Score", "max"),
+        Mean_Bit_Score=("Bit_Score", "mean"),
+        N_matches=("Pathogen_Protein_ID", "count"),
+        N_BLAST_hits=("Has_BLAST_Hit", "sum")
     )
     .reset_index()
+)
+
+summary_df["Minus_Log10_Best_Evalue"] = -np.log10(
+    summary_df["Best_Evalue"].replace(0, np.nextafter(0, 1))
+)
+
+summary_df = (
+    summary_df
     .fillna(0)
     .sort_values("N_matches", ascending=False)
     .round(2)
 )
 
+save_csv(
+    summary_df,
+    DATA_DIR / "proccesed/iedb_blastp_similarity_summary.csv"
+)
 
-# ---------------------- Scatter plot: global protein similarity ---------------------- #
+print("Saved BLASTp summary table.")
+
+
+# ---------------------- Scatter plot: BLASTp similarity ---------------------- #
+
+plot_df = summary_df[summary_df["N_BLAST_hits"] > 0].copy()
 
 plt.figure(figsize=(9, 7))
 
 size_scale = 3
 
 sc = plt.scatter(
-    summary_df["Mean_Identity"],
-    summary_df["Mean_Normalized_Alignment_Score"],
-    c=summary_df["N_matches"],
-    s=summary_df["Mean_Query_Coverage"] * size_scale,
+    plot_df["Mean_Identity"],
+    plot_df["Minus_Log10_Best_Evalue"],
+    c=plot_df["N_matches"],
+    s=plot_df["Mean_Query_Coverage"] * size_scale,
     norm=LogNorm(),
     alpha=0.75
 )
 
 plt.errorbar(
-    summary_df["Mean_Identity"],
-    summary_df["Mean_Normalized_Alignment_Score"],
-    xerr=summary_df["SD_Identity"],
-    yerr=summary_df["SD_Normalized_Alignment_Score"],
+    plot_df["Mean_Identity"],
+    plot_df["Minus_Log10_Best_Evalue"],
+    xerr=plot_df["SD_Identity"],
     fmt="none",
     alpha=0.25,
     capsize=2
@@ -341,11 +431,11 @@ highlight_ids = [
     "Q71DI3", "P62807", "P11142", "P55087", "Q05329", "P06733"
 ]
 
-label_df = summary_df[summary_df["IEDB_Protein_ID"].isin(highlight_ids)]
+label_df = plot_df[plot_df["IEDB_Protein_ID"].isin(highlight_ids)]
 
 plt.scatter(
     label_df["Mean_Identity"],
-    label_df["Mean_Normalized_Alignment_Score"],
+    label_df["Minus_Log10_Best_Evalue"],
     s=label_df["Mean_Query_Coverage"] * size_scale * 1.3,
     facecolors="none",
     edgecolors="black",
@@ -356,10 +446,15 @@ plt.scatter(
 texts = [
     plt.text(
         row["Mean_Identity"],
-        row["Mean_Normalized_Alignment_Score"],
+        row["Minus_Log10_Best_Evalue"],
         row["Epitope_Source"],
         fontsize=8,
-        bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.7)
+        bbox=dict(
+            boxstyle="round,pad=0.2",
+            facecolor="white",
+            edgecolor="none",
+            alpha=0.7
+        )
     )
     for _, row in label_df.iterrows()
 ]
@@ -367,7 +462,7 @@ texts = [
 adjust_text(
     texts,
     x=label_df["Mean_Identity"].to_numpy(),
-    y=label_df["Mean_Normalized_Alignment_Score"].to_numpy(),
+    y=label_df["Minus_Log10_Best_Evalue"].to_numpy(),
     arrowprops=dict(
         arrowstyle="-|>",
         color="black",
@@ -383,8 +478,8 @@ adjust_text(
     expand_text=(1.2, 1.2)
 )
 
-plt.xlabel("Mean global percent identity, gaps included (%)")
-plt.ylabel("Mean normalized global alignment score")
+plt.xlabel("Mean BLASTp percent identity (%)")
+plt.ylabel("-log10(best E-value)")
 
 cbar = plt.colorbar(sc)
 cbar.set_label("Number of matched pathogen proteins (log scale)")

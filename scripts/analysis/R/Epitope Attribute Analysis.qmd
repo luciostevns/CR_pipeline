@@ -262,8 +262,7 @@ ggplot(
   aes(
     x = n_species,
     y = n_matches,
-    color = pathogen_location,
-    size = count
+    color = pathogen_location
   )
 ) +
   geom_point(alpha = 0.5) +
@@ -285,22 +284,18 @@ ggplot(
     x = "Number of Matching Pathogen Species (log1p scale)",
     y = "Number of Matches (log1p scale)",
     color = "Pathogen Protein Location"
-  ) +
-  my_theme
+  )
 ```
 
 ### Both plots
 
 ```{r}
-library(patchwork)
-
 p_location <- ggplot(
   match_location_analysis,
   aes(
     x = n_species,
     y = n_matches,
-    color = pathogen_location,
-    size = count
+    color = pathogen_location
   )
 ) +
   geom_point(alpha = 0.5) +
@@ -311,10 +306,6 @@ p_location <- ggplot(
   scale_y_continuous(
     trans = "log1p",
     breaks = c(0, 1, 10, 100, 1000)
-  ) +
-  scale_size_continuous(
-    range = c(1, 6),
-    name = "No. of Matches\nin Group"
   ) +
   labs(
     title = "A. Pathogen Protein Subcellular Location",
@@ -330,8 +321,7 @@ p_rsa <- ggplot(
   aes(
     x = n_species,
     y = n_matches,
-    color = rsa_group,
-    size = count
+    color = rsa_group
   )
 ) +
   geom_point(alpha = 0.5) +
@@ -342,10 +332,6 @@ p_rsa <- ggplot(
   scale_y_continuous(
     trans = "log1p",
     breaks = c(0, 1, 10, 100, 1000)
-  ) +
-  scale_size_continuous(
-    range = c(1, 6),
-    name = "No. of Matches\nin Group"
   ) +
   labs(
     title = "B. Pathogen Peptide Relative Solvent Accessibility",
@@ -1190,18 +1176,16 @@ ggplot(
   hpa_results,
   aes(
     x = tau_tissue,
-    y = n_matches_prot,
-    color = match_group
+    y = n_matches_prot
   )
 ) +
   geom_point(size = 3, alpha = 0.8) +
   scale_y_log10() +
   labs(
     x = "Tissue specificity score (Tau)",
-    y = "Number of pathogen matches",
-    color = "Protein group"
+    y = "Number of pathogen matches"
   ) +
-  theme_minimal()
+  my_theme
 ```
 
 ### Matched epitope source protein subcellular location association to number of matches and number of matched species
@@ -1284,8 +1268,11 @@ epitope_source_match_ratio |>
 ### Added params
 
 ```{r}
+group_1_ids <- c("P10809", "P11021", "P06733", "P38646", "P0DMV8")
+
 perfect_match |>
   filter(Matched) |>
+  filter(IEDB_Protein_ID %in% group_1_ids) |>
   mutate(
     Response_measured = if_else(
       is.na(Response_measured) | Response_measured == "",
@@ -1309,4 +1296,91 @@ perfect_match |>
     panel.grid.major.y = element_blank(),
     axis.line = element_line(color = "black")
   )
+```
+
+```{r}
+perfect_match |>
+  filter(Matched) |>
+  filter(Disease == "type 1 diabetes mellitus") |>
+  filter(Epitope_Source == "Insulin") |>
+  pull(Pathogen_Scientific_name) |> unique()
+
+pathogen_data |>
+  filter(str_detect(Organism_Source, "Mycobacterium")) |>
+  pull(Organism_Source) |> unique()
+```
+
+### Epitope match distribution
+
+```{r}
+epitope_match_distribution <- perfect_match |>
+  count(Assay_ID, name = "n_rows") |>
+  mutate(
+    n_matches = if_else(n_rows == 1, 0L, n_rows),
+    match_status = if_else(n_matches == 0, "Zero matches", "At least one match")
+  )
+
+p_zero_vs_matched <- epitope_match_distribution |>
+  count(match_status) |>
+  ggplot(aes(x = match_status, y = n, fill = match_status)) +
+  geom_col(color = "black", show.legend = FALSE) +
+  scale_fill_manual(
+    values = c(
+      "Zero matches" = "firebrick",
+      "At least one match" = "steelblue"
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Number of epitopes"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+p_match_hist <- epitope_match_distribution |>
+  filter(n_matches > 0) |>
+  ggplot(aes(x = n_matches)) +
+  geom_histogram(
+    binwidth = 5,
+    boundary = 1.5,
+    fill = "steelblue"
+  ) +
+  labs(
+    x = "Number of matches per matched epitope",
+    y = "Number of epitopes"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+p_zero_vs_matched + p_match_hist
+```
+
+```{r}
+perfect_match |>
+  filter(Matched) |>
+  filter(str_detect(Pathogen_Organism, "Escherichia")) |>
+  pull(Epitope_Source) |> unique()
+```
+
+```{r}
+perfect_match |>
+  filter(Matched) |>
+  filter(str_detect(Epitope_Source, "Glutamate"))
+
+pathogen_data |>
+  filter(str_detect(Organism_Source, "Mycobacterium")) |>
+  filter(str_detect(Annotation, "GroEL"))
+```
+
+### MHC restriction
+
+```{r}
+IEDB_data |>
+  pull(MHC_restriction) |> unique()
 ```
