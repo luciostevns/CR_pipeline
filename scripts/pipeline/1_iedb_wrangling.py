@@ -99,13 +99,23 @@ def main() -> None:
 
     autoimmune = iedb_df[iedb_df["Disease_info"] == "Occurrence of autoimmune disease"].copy().drop(columns=["Disease_info"])
 
-    print(f"Autoimmune subset size: {len(autoimmune)}")
+    print(f"Dataset size before removing non-autoimmune: {len(iedb_df)}")
+    print(f"Unique all epitopes: {iedb_df['Assay_ID'].nunique()}")
+    print(f"Dataset size after removing non-autoimmune: {len(autoimmune)}")
     print(f"Unique autoimmune epitopes: {autoimmune['Assay_ID'].nunique()}")
+
+    autoimmune_unique = autoimmune.drop_duplicates(
+        subset=["Protein_ID", "Sequence"]
+    )
+
+    print(f"Dataset size before removing duplicate seqs: {len(autoimmune)}")
+    print(f"Dataset size after removing duplicate seqs: {len(autoimmune_unique)}")
+    print(f"Unique autoimmune epitopes: {autoimmune_unique['Assay_ID'].nunique()}")
 
     min_len = config["filtering"]["min_epitope_length"]
     max_len = config["filtering"]["max_epitope_length"]
 
-    mod_res_df = autoimmune[autoimmune["Modified_residues"].isna()].copy()
+    mod_res_df = autoimmune_unique[autoimmune_unique["Modified_residues"].isna()].copy()
 
     print(f"Dataset size after filtering modified residues: {len(mod_res_df)}")
 
@@ -114,12 +124,6 @@ def main() -> None:
     ].copy()
 
     print(f"Dataset size after filtering 12-25: {len(filtered_data)}")
-
-    filtered_data = filtered_data.drop_duplicates(
-        subset=["Protein_ID", "Sequence"]
-    )
-
-    print(f"Dataset size after removing duplicate seqs: {len(filtered_data)}")
 
     filtered_sequences = remove_nested_epitopes(filtered_data)
 
