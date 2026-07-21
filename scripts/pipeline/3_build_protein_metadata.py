@@ -1,3 +1,4 @@
+from email import header
 import re
 
 import pandas as pd
@@ -20,6 +21,46 @@ def load_input_data():
 
     return fasta_records, pathogenic_df
 
+def parse_header_annotation(header: str) -> str | None:
+    """
+    Extract a real protein annotation from a FASTA header.
+
+    For UniProtKB:
+        sp|P0A6F5|CH60_ECOLI Chaperonin GroEL OS=...
+        -> Chaperonin GroEL
+
+    For UniParc:
+        UPI00000BD9A2 status=active PROTEOME=... SOURCE_DB=UniParc
+        -> None
+    """
+
+    # Remove the first token, which is the sequence ID
+    parts = header.split(maxsplit=1)
+
+    if len(parts) == 1:
+        return None
+
+    rest = parts[1]
+
+    # Cut away known metadata fields
+    for marker in [" OS=", " OX=", " GN=", " PE=", " SV=", " PROTEOME=", " SOURCE_DB=", " status="]:
+        if marker in rest:
+            rest = rest.split(marker)[0].strip()
+
+    if not rest:
+        return None
+
+    # Avoid storing metadata as an annotation
+    bad_prefixes = (
+        "status=",
+        "PROTEOME=",
+        "SOURCE_DB=",
+    )
+
+    if rest.startswith(bad_prefixes):
+        return None
+
+    return rest
 
 def parse_fasta_to_df(fasta_records, dataset_name: str) -> pd.DataFrame:
     """
@@ -45,11 +86,7 @@ def parse_fasta_to_df(fasta_records, dataset_name: str) -> pd.DataFrame:
         proteome_id = proteome_match.group(1) if proteome_match else None
 
         # Protein annotation
-        annotation = None
-        header_parts = header.split()
-
-        if len(header_parts) > 1:
-            annotation = " ".join(header_parts[1:]).split("OS=")[0].strip()
+        annotation = parse_header_annotation(header)
 
         # Gene name
         gene_name_match = re.search(r"GN=([^\s]+)", header)
@@ -130,20 +167,51 @@ def print_diagnostics(protein_metadata_df: pd.DataFrame) -> None:
     n_unique_rows = protein_metadata_df.drop_duplicates().shape[0]
     print(f"\nUnique rows (all columns): {n_unique_rows}")
 
-    duplicate_sequence_counts = (
-        protein_metadata_df
-        .groupby("Sequence")
-        .agg(
-            count=("Sequence", "size"),
-            annotations=("Annotation", lambda x: list(pd.unique(x)))
-        )
-        .sort_values("count", ascending=False)
-        .reset_index()
+def print_duplicate_diagnostics(protein_metadata_df: pd.DataFrame) -> None:
+    print("\nDuplicate diagnostics:")
+
+    duplicate_protein_id_rows = protein_metadata_df.duplicated(
+        subset=["Protein_ID"],
+        keep=False,
+    ).sum()
+
+    duplicate_protein_proteome_rows = protein_metadata_df.duplicated(
+        subset=["Protein_ID", "Proteome_ID"],
+        keep=False,
+    ).sum()
+
+    duplicate_full_rows = protein_metadata_df.duplicated().sum()
+
+    print(f"Rows with duplicated Protein_ID: {duplicate_protein_id_rows}")
+    print(f"Rows with duplicated Protein_ID + Proteome_ID: {duplicate_protein_proteome_rows}")
+    print(f"Fully duplicated rows: {duplicate_full_rows}")
+
+    print("\nMost duplicated Protein_IDs:")
+    print(
+        protein_metadata_df["Protein_ID"]
+        .value_counts()
+        .head(20)
     )
 
-    print("\nMost duplicated protein sequences:")
-    print(duplicate_sequence_counts[["annotations", "count"]].head(10))
+    print("\nExample duplicated Protein_ID rows:")
+    duplicated_examples = protein_metadata_df[
+        protein_metadata_df.duplicated(subset=["Protein_ID"], keep=False)
+    ].sort_values("Protein_ID")
 
+    print(
+        duplicated_examples[
+            [
+                "Protein_ID",
+                "Proteome_ID",
+                "Scientific_name",
+                "Genus_species",
+                "Strain",
+                "Annotation",
+                "Gene_name",
+                "Sequence",
+            ]
+        ].tail(10)
+    )
 
 def main() -> None:
     fasta_records, pathogenic_df = load_input_data()
@@ -163,6 +231,7 @@ def main() -> None:
     )
 
     print_diagnostics(protein_metadata_df)
+    print_duplicate_diagnostics(protein_metadata_df)
 
     output_path = DATA_DIR / "intermediate/protein_metadata.csv"
 

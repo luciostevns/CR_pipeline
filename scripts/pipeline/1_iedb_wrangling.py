@@ -93,42 +93,89 @@ def main() -> None:
 
     print(f"IEDB dataset size: {len(iedb_df)}")
 
+    # Standardize and clean columns
     iedb_df = standardize_iedb_columns(iedb_df)
-
     iedb_df = clean_iedb_data(iedb_df)
 
-    autoimmune = iedb_df[iedb_df["Disease_info"] == "Occurrence of autoimmune disease"].copy().drop(columns=["Disease_info"])
-
     print(f"Dataset size before removing non-autoimmune: {len(iedb_df)}")
-    print(f"Unique all epitopes: {iedb_df['Assay_ID'].nunique()}")
-    print(f"Dataset size after removing non-autoimmune: {len(autoimmune)}")
-    print(f"Unique autoimmune epitopes: {autoimmune['Assay_ID'].nunique()}")
+    print(f"Unique all assays: {iedb_df['Assay_ID'].nunique()}")
 
-    autoimmune_unique = autoimmune.drop_duplicates(
-        subset=["Protein_ID", "Sequence"]
+    # ------------------------------------------------------------
+    # 1. Keep autoimmune rows only
+    # ------------------------------------------------------------
+    autoimmune = (
+        iedb_df[iedb_df["Disease_info"] == "Occurrence of autoimmune disease"]
+        .copy()
+        .drop(columns=["Disease_info"])
     )
 
-    print(f"Dataset size before removing duplicate seqs: {len(autoimmune)}")
-    print(f"Dataset size after removing duplicate seqs: {len(autoimmune_unique)}")
-    print(f"Unique autoimmune epitopes: {autoimmune_unique['Assay_ID'].nunique()}")
+    print(f"Dataset size after removing non-autoimmune: {len(autoimmune)}")
+    print(f"Unique autoimmune assays: {autoimmune['Assay_ID'].nunique()}")
 
+    # ------------------------------------------------------------
+    # 2. Drop duplicate Protein_ID + Sequence + Modified_residues
+    # ------------------------------------------------------------
+    print(f"Dataset size before duplicate filtering: {len(autoimmune)}")
+    print(f"Unique assays before duplicate filtering: {autoimmune['Assay_ID'].nunique()}")
+
+    unique_epitopes = autoimmune.drop_duplicates(
+        subset=["Protein_ID", "Sequence", "Modified_residues"],
+        keep="first"
+    ).copy()
+
+    print(f"Dataset size after duplicate filtering: {len(unique_epitopes)}")
+    print(f"Unique assays after duplicate filtering: {unique_epitopes['Assay_ID'].nunique()}")
+    print(
+        "Unique Protein_ID + Sequence + Modified_residues groups:",
+        unique_epitopes[["Protein_ID", "Sequence", "Modified_residues"]]
+        .drop_duplicates()
+        .shape[0]
+    )
+
+    # Get length limits from config
     min_len = config["filtering"]["min_epitope_length"]
     max_len = config["filtering"]["max_epitope_length"]
 
-    mod_res_df = autoimmune_unique[autoimmune_unique["Modified_residues"].isna()].copy()
-
-    print(f"Dataset size after filtering modified residues: {len(mod_res_df)}")
-
-    filtered_data = mod_res_df[
-        mod_res_df["Sequence"].str.len().between(min_len, max_len, inclusive="both")
+    # ------------------------------------------------------------
+    # 3. Remove modified residues
+    # ------------------------------------------------------------
+    unmodified = unique_epitopes[
+        unique_epitopes["Modified_residues"].isna()
     ].copy()
 
-    print(f"Dataset size after filtering 12-25: {len(filtered_data)}")
+    print(f"Dataset size after filtering modified residues: {len(unmodified)}")
+    print(f"Unique assays after filtering modified residues: {unmodified['Assay_ID'].nunique()}")
 
-    filtered_sequences = remove_nested_epitopes(filtered_data)
+    # ------------------------------------------------------------
+    # 4. Filter epitope length
+    # ------------------------------------------------------------
+    length_filtered = unmodified[
+        unmodified["Sequence"].str.len().between(
+            min_len,
+            max_len,
+            inclusive="both"
+        )
+    ].copy()
+
+    print(f"Dataset size after filtering {min_len}-{max_len}: {len(length_filtered)}")
+    print(f"Unique assays after length filtering: {length_filtered['Assay_ID'].nunique()}")
+
+    # ------------------------------------------------------------
+    # 5. Remove nested epitopes
+    # ------------------------------------------------------------
+    filtered_sequences = remove_nested_epitopes(length_filtered)
 
     print(f"Dataset size after removing nested epitopes: {len(filtered_sequences)}")
+    print(f"Unique retained assays after nested filtering: {filtered_sequences['Assay_ID'].nunique()}")
+    print(f"Unique source proteins after final filtering: {filtered_sequences['Protein_ID'].nunique()}")
+    print(
+        "Unique final protein-sequence pairs:",
+        filtered_sequences[["Protein_ID", "Sequence"]].drop_duplicates().shape[0]
+    )
 
+    # ------------------------------------------------------------
+    # 6. Save
+    # ------------------------------------------------------------
     output_path = DATA_DIR / "intermediate/wrangled_IEDB.csv"
     save_csv(filtered_sequences, output_path)
 

@@ -13,7 +13,7 @@ PATHOGEN_FASTA_BATCH_SIZE = 500
 
 
 def load_input_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    match_file = DATA_DIR / "proccesed/perfect_matches_2_0.csv"
+    match_file = DATA_DIR / "proccesed/iedb_match_regions_long.csv"
     protein_meta_file = DATA_DIR / "intermediate/protein_metadata.csv"
 
     print("Loading data files...")
@@ -46,6 +46,36 @@ def get_matched_pathogen_subset(
 
     print(
         "Matched protein-proteome entries found in protein_metadata.csv: "
+        f"{len(pathogen_subset)}"
+    )
+
+    sequence_check = (
+        pathogen_subset
+        .dropna(subset=["Protein_ID_clean", "Sequence"])
+        .groupby("Protein_ID_clean")["Sequence"]
+        .nunique()
+    )
+
+    conflicting_sequences = sequence_check[sequence_check > 1]
+
+    print(
+        "Protein IDs with more than one unique sequence: "
+        f"{len(conflicting_sequences)}"
+    )
+
+    if len(conflicting_sequences) > 0:
+        print("Examples of conflicting protein IDs:")
+        print(conflicting_sequences.head(20))
+
+    pathogen_subset = (
+        pathogen_subset
+        .sort_values(["Protein_ID_clean", "Proteome_ID"])
+        .drop_duplicates(subset=["Protein_ID_clean"], keep="first")
+        .copy()
+    )
+
+    print(
+        "Unique matched pathogen proteins retained for FASTA export: "
         f"{len(pathogen_subset)}"
     )
 
@@ -224,6 +254,8 @@ def main() -> None:
     export_iedb_source_fastas(match_df)
 
     print("Done.")
+
+
 
 
 if __name__ == "__main__":

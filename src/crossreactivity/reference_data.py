@@ -131,6 +131,7 @@ GRAM_STATUS = {
     "Corynebacterium striatum": "positive",
     "Enterococcus faecalis": "positive",
     "Enterococcus faecium": "positive",
+    "Enterococcus hirae": "positive",
     "Intestinibacter bartlettii": "positive",
     "Listeria innocua": "positive",
     "Listeria monocytogenes": "positive",
@@ -155,5 +156,6 @@ GRAM_STATUS = {
     "Streptococcus pneumoniae": "positive",
     "Streptococcus pseudopneumoniae": "positive",
     "Streptococcus pyogenes": "positive",
+    "Streptococcus suis": "positive",
     "Terrisporobacter othiniensis": "positive",
 }

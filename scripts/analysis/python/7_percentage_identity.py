@@ -23,8 +23,17 @@ def load_iedb_sequences_from_fasta(fasta_path, uniprot_ids):
     uniprot_ids = set(uniprot_ids)
     rows = []
 
-    for record in tqdm(SeqIO.parse(fasta_path, "fasta"), desc="Loading IEDB sequences"):
-        protein_id = record.id.split("|")[1] if "|" in record.id else record.id.split()[0]
+    for record in tqdm(
+        SeqIO.parse(fasta_path, "fasta"),
+        desc="Loading IEDB sequences"
+    ):
+        protein_id = (
+            record.id.split("|")[1]
+            if "|" in record.id
+            else record.id.split()[0]
+        )
+
+        protein_id = clean_id(protein_id)
 
         if protein_id in uniprot_ids:
             rows.append({
@@ -45,7 +54,7 @@ def ensure_iedb_fasta_exists(fasta_path, protein_ids):
 
     failed = []
 
-    with open(fasta_path, "w") as out_f:
+    with open(fasta_path, "w", encoding="utf-8") as out_f:
         for protein_id in tqdm(protein_ids, desc="Fetching UniProt FASTA"):
             fasta_text = fetch_uniprot_fasta(protein_id)
 
@@ -61,29 +70,118 @@ def ensure_iedb_fasta_exists(fasta_path, protein_ids):
         print(f"Warning: failed to fetch {len(failed)} proteins from UniProt.")
 
 
+def empty_alignment_metrics(metric_cols):
+    return pd.Series({col: None for col in metric_cols})
+
+
+def compute_alignment_metrics(seq1, seq2, aligner, metric_cols):
+    if pd.isna(seq1) or pd.isna(seq2):
+        return empty_alignment_metrics(metric_cols)
+
+    seq1, seq2 = str(seq1).strip(), str(seq2).strip()
+
+    if not seq1 or not seq2:
+        return empty_alignment_metrics(metric_cols)
+
+    try:
+        best = aligner.align(seq1, seq2)[0]
+    except Exception:
+        return empty_alignment_metrics(metric_cols)
+
+    matches = 0
+    mismatches = 0
+    gap_count = 0
+    alignment_length = 0
+
+    query_positions = set()
+    subject_positions = set()
+
+    coords = best.coordinates
+
+    for i in range(coords.shape[1] - 1):
+        start1, end1 = coords[0, i], coords[0, i + 1]
+        start2, end2 = coords[1, i], coords[1, i + 1]
+
+        len1 = end1 - start1
+        len2 = end2 - start2
+
+        if len1 > 0 and len2 > 0:
+            segment1 = seq1[start1:end1]
+            segment2 = seq2[start2:end2]
+
+            query_positions.update(range(start1, end1))
+            subject_positions.update(range(start2, end2))
+
+            alignment_length += len(segment1)
+
+            for a, b in zip(segment1, segment2):
+                if a == b:
+                    matches += 1
+                else:
+                    mismatches += 1
+
+        else:
+            gap_len = max(len1, len2)
+            gap_count += gap_len
+            alignment_length += gap_len
+
+    percent_identity = (
+        (matches / alignment_length) * 100
+        if alignment_length
+        else 0.0
+    )
+
+    query_coverage = (
+        (len(query_positions) / len(seq1)) * 100
+        if len(seq1)
+        else 0.0
+    )
+
+    subject_coverage = (
+        (len(subject_positions) / len(seq2)) * 100
+        if len(seq2)
+        else 0.0
+    )
+
+    raw_score = best.score
+    smallest_sequence_length = min(len(seq1), len(seq2))
+
+    normalized_score = (
+        raw_score / smallest_sequence_length
+        if smallest_sequence_length > 0
+        else None
+    )
+
+    return pd.Series({
+        "Percent_Identity": percent_identity,
+        "Alignment_Length": alignment_length,
+        "Matches": matches,
+        "Mismatches": mismatches,
+        "Gap_Count": gap_count,
+        "Alignment_Score": raw_score,
+        "Normalized_Alignment_Score": normalized_score,
+        "Query_Coverage": query_coverage,
+        "Subject_Coverage": subject_coverage,
+    })
+
+
 # ---------------------- Load data ---------------------- #
 
 print("Loading data...")
 
-perfect_match = load_csv(DATA_DIR / "proccesed/perfect_matches_2_0.csv")
+match_df = load_csv(DATA_DIR / "proccesed/iedb_match_regions_long.csv")
 pathogen_data = load_csv(DATA_DIR / "intermediate/protein_metadata.csv")
 
-
-# ---------------------- Filter matched rows ---------------------- #
-
-perfect_match["Matched"] = perfect_match["Matched"].astype(str).str.lower() == "true"
-perfect_match = perfect_match[perfect_match["Matched"]].copy()
-
-print(f"Matched rows: {len(perfect_match)}")
+print(f"Long match rows: {len(match_df)}")
 
 
 # ---------------------- Normalize protein IDs ---------------------- #
 
-perfect_match["Pathogen_Protein_ID"] = perfect_match["Pathogen_Protein_ID"].map(clean_id)
-perfect_match["IEDB_Protein_ID"] = perfect_match["IEDB_Protein_ID"].map(clean_id)
+match_df["Pathogen_Protein_ID"] = match_df["Pathogen_Protein_ID"].map(clean_id)
+match_df["IEDB_Protein_ID"] = match_df["IEDB_Protein_ID"].map(clean_id)
 pathogen_data["Protein_ID"] = pathogen_data["Protein_ID"].map(clean_id)
 
-perfect_match = perfect_match.dropna(
+match_df = match_df.dropna(
     subset=["Pathogen_Protein_ID", "IEDB_Protein_ID"]
 ).copy()
 
@@ -91,13 +189,15 @@ pathogen_data = pathogen_data.dropna(
     subset=["Protein_ID"]
 ).copy()
 
+print(f"Rows after dropping missing protein IDs: {len(match_df)}")
+
 
 # ---------------------- Load/fetch IEDB source protein FASTA ---------------------- #
 
 fasta_path = DATA_DIR / "intermediate" / "matched_iedb_source_proteins.fasta"
 
 matched_iedb_ids = (
-    perfect_match["IEDB_Protein_ID"]
+    match_df["IEDB_Protein_ID"]
     .dropna()
     .unique()
     .tolist()
@@ -125,16 +225,28 @@ if missing_iedb_ids:
         "were not found in the FASTA."
     )
 
+    save_csv(
+        pd.DataFrame({"IEDB_Protein_ID": sorted(missing_iedb_ids)}),
+        DATA_DIR / "proccesed/missing_iedb_ids_for_alignment.csv"
+    )
+
 
 # ---------------------- Prepare merge tables ---------------------- #
 
 pathogen_meta = (
-    pathogen_data[["Protein_ID", "Genus_species", "Sequence", "Strain"]]
+    pathogen_data[
+        [
+            "Protein_ID",
+            "Genus_species",
+            "Sequence",
+            "Strain",
+        ]
+    ]
     .drop_duplicates(subset=["Protein_ID"])
     .rename(columns={
         "Protein_ID": "Pathogen_Protein_ID_merge",
         "Genus_species": "Organism_Source",
-        "Sequence": "Pathogen_Sequence"
+        "Sequence": "Pathogen_Sequence",
     })
 )
 
@@ -142,7 +254,7 @@ iedb_seq = (
     uniprot_seq_df
     .drop_duplicates(subset=["Protein_ID"])
     .rename(columns={
-        "Protein_ID": "IEDB_Protein_ID_merge"
+        "Protein_ID": "IEDB_Protein_ID_merge",
     })
 )
 
@@ -151,20 +263,48 @@ print(f"Unique IEDB proteins with sequences: {len(iedb_seq)}")
 
 # ---------------------- Build full alignment table ---------------------- #
 
+traceback_cols = [
+    "IEDB_Protein_ID",
+    "Pathogen_Protein_ID",
+    "Epitope_Source",
+    "Disease",
+    "Disease_stage",
+    "Response_measured",
+    "Effector_cell",
+    "Pathogen_Organism",
+    "Pathogen_Scientific_name",
+    "Pathogen_Annotation",
+    "Pathogen_Gene_Name",
+    "IEDB_Region_ID",
+    "IEDB_Region_Start",
+    "IEDB_Region_End",
+    "IEDB_Region_Length",
+]
+
+traceback_cols = [
+    col for col in traceback_cols
+    if col in match_df.columns
+]
+
+protein_pair_traceback = (
+    match_df[traceback_cols]
+    .drop_duplicates()
+)
+
 full_align_analysis = (
-    perfect_match
+    protein_pair_traceback
     .drop_duplicates(subset=["IEDB_Protein_ID", "Pathogen_Protein_ID"])
     .merge(
         pathogen_meta,
         how="left",
         left_on="Pathogen_Protein_ID",
-        right_on="Pathogen_Protein_ID_merge"
+        right_on="Pathogen_Protein_ID_merge",
     )
     .merge(
         iedb_seq,
         how="left",
         left_on="IEDB_Protein_ID",
-        right_on="IEDB_Protein_ID_merge"
+        right_on="IEDB_Protein_ID_merge",
     )
     .drop(columns=["Pathogen_Protein_ID_merge", "IEDB_Protein_ID_merge"])
 )
@@ -179,7 +319,13 @@ print(f"Unique pathogen proteins: {unique_pathogen_proteins}")
 
 aligner = Align.PairwiseAligner()
 aligner.mode = "global"
-aligner.substitution_matrix = substitution_matrices.load("BLOSUM62")  # leave gap scores as Biopython defaults
+aligner.substitution_matrix = substitution_matrices.load("BLOSUM62")
+
+aligner.open_gap_score = -5
+aligner.extend_gap_score = -1
+
+print("Open:", aligner.open_gap_score)
+print("Extend:", aligner.extend_gap_score)
 
 metric_cols = [
     "Percent_Identity",
@@ -190,86 +336,8 @@ metric_cols = [
     "Alignment_Score",
     "Normalized_Alignment_Score",
     "Query_Coverage",
-    "Subject_Coverage"
+    "Subject_Coverage",
 ]
-
-
-def empty_alignment_metrics():
-    return pd.Series({col: None for col in metric_cols})
-
-
-def compute_alignment_metrics(seq1, seq2):
-    if pd.isna(seq1) or pd.isna(seq2):
-        return empty_alignment_metrics()
-
-    seq1, seq2 = str(seq1).strip(), str(seq2).strip()
-
-    if not seq1 or not seq2:
-        return empty_alignment_metrics()
-
-    try:
-        best = aligner.align(seq1, seq2)[0]
-    except Exception:
-        return empty_alignment_metrics()
-
-    matches = mismatches = gap_count = aligned_pairs = alignment_length = 0
-    query_positions, subject_positions = set(), set()
-    coords = best.coordinates
-
-    for i in range(coords.shape[1] - 1):
-        start1, end1 = coords[0, i], coords[0, i + 1]
-        start2, end2 = coords[1, i], coords[1, i + 1]
-
-        len1 = end1 - start1
-        len2 = end2 - start2
-
-        if len1 > 0 and len2 > 0:
-            segment1 = seq1[start1:end1]
-            segment2 = seq2[start2:end2]
-
-            query_positions.update(range(start1, end1))
-            subject_positions.update(range(start2, end2))
-
-            aligned_pairs += len(segment1)
-            alignment_length += len(segment1)
-
-            for a, b in zip(segment1, segment2):
-                if a == b:
-                    matches += 1
-                else:
-                    mismatches += 1
-
-        else:
-            gap_len = max(len1, len2)
-            gap_count += gap_len
-            alignment_length += gap_len
-
-    percent_identity = (matches / alignment_length) * 100 if alignment_length else 0.0
-    query_coverage = (len(query_positions) / len(seq1)) * 100
-    subject_coverage = (len(subject_positions) / len(seq2)) * 100
-
-    raw_score = best.score
-    self_score_1 = aligner.score(seq1, seq1)
-    self_score_2 = aligner.score(seq2, seq2)
-    max_possible_score = min(self_score_1, self_score_2)
-
-    normalized_score = (
-        raw_score / max_possible_score
-        if max_possible_score and max_possible_score > 0
-        else None
-    )
-
-    return pd.Series({
-        "Percent_Identity": percent_identity,
-        "Alignment_Length": alignment_length,
-        "Matches": matches,
-        "Mismatches": mismatches,
-        "Gap_Count": gap_count,
-        "Alignment_Score": raw_score,
-        "Normalized_Alignment_Score": normalized_score,
-        "Query_Coverage": query_coverage,
-        "Subject_Coverage": subject_coverage
-    })
 
 
 # ---------------------- Compute global alignment metrics ---------------------- #
@@ -279,12 +347,19 @@ print("Computing global alignment metrics...")
 metrics = full_align_analysis.progress_apply(
     lambda row: compute_alignment_metrics(
         row["IEDB_Sequence"],
-        row["Pathogen_Sequence"]
+        row["Pathogen_Sequence"],
+        aligner,
+        metric_cols,
     ),
-    axis=1
+    axis=1,
 )
 
 full_align_analysis = pd.concat([full_align_analysis, metrics], axis=1)
+
+alignment_output_path = DATA_DIR / "proccesed/global_alignment_analysis.csv"
+save_csv(full_align_analysis, alignment_output_path)
+
+print(f"Saved full alignment analysis to: {alignment_output_path}")
 
 
 # ---------------------- Summary table ---------------------- #
@@ -296,19 +371,27 @@ summary_df = (
     .agg(
         Mean_Identity=("Percent_Identity", "mean"),
         SD_Identity=("Percent_Identity", "std"),
+        Mean_Alignment_Score=("Alignment_Score", "mean"),
+        SD_Alignment_Score=("Alignment_Score", "std"),
         Mean_Normalized_Alignment_Score=("Normalized_Alignment_Score", "mean"),
         SD_Normalized_Alignment_Score=("Normalized_Alignment_Score", "std"),
         Mean_Query_Coverage=("Query_Coverage", "mean"),
         Mean_Subject_Coverage=("Subject_Coverage", "mean"),
         Mean_Alignment_Length=("Alignment_Length", "mean"),
         Mean_Gap_Count=("Gap_Count", "mean"),
-        N_matches=("IEDB_Protein_ID", "count")
+        N_pathogen_proteins=("Pathogen_Protein_ID", "nunique"),
+        N_protein_pairs=("IEDB_Protein_ID", "count"),
     )
     .reset_index()
     .fillna(0)
-    .sort_values("N_matches", ascending=False)
+    .sort_values("N_pathogen_proteins", ascending=False)
     .round(2)
 )
+
+summary_output_path = DATA_DIR / "proccesed/global_alignment_summary.csv"
+save_csv(summary_df, summary_output_path)
+
+print(f"Saved alignment summary to: {summary_output_path}")
 
 
 # ---------------------- Scatter plot: global protein similarity ---------------------- #
@@ -320,10 +403,10 @@ size_scale = 3
 sc = plt.scatter(
     summary_df["Mean_Identity"],
     summary_df["Mean_Normalized_Alignment_Score"],
-    c=summary_df["N_matches"],
+    c=summary_df["N_pathogen_proteins"],
     s=summary_df["Mean_Query_Coverage"] * size_scale,
     norm=LogNorm(),
-    alpha=0.75
+    alpha=0.75,
 )
 
 plt.errorbar(
@@ -333,12 +416,30 @@ plt.errorbar(
     yerr=summary_df["SD_Normalized_Alignment_Score"],
     fmt="none",
     alpha=0.25,
-    capsize=2
+    capsize=2,
 )
 
 highlight_ids = [
-    "P10809", "P0DMV8", "P11021", "P01308", "P62805", "P38646",
-    "Q71DI3", "P62807", "P11142", "P55087", "Q05329", "P06733"
+    # Already selected / major proteins
+    "P10809",  # 60 kDa heat shock protein, mitochondrial
+    "P0DMV8",  # Heat shock 70 kDa protein 1A
+    "P11021",  # Endoplasmic reticulum chaperone BiP
+    "P01308",  # Insulin
+    "P62805",  # Histone H4
+    "P38646",  # Stress-70 protein, mitochondrial
+    "Q71DI3",  # Histone H3.2
+    "P62807",  # Histone H2B type 1-C/E/F/G/I
+    "P11142",  # Heat shock cognate 71 kDa protein
+    "P55087",  # Aquaporin-4
+    "Q05329",  # Glutamate decarboxylase 2
+    "P06733",  # Alpha-enolase
+
+    # Additional selected proteins
+    "P02671",  # Fibrinogen alpha chain
+    "Q8IWU4",  # Proton-coupled zinc antiporter SLC30A8
+    "P02458",  # Collagen alpha-1(II) chain
+    "Q01955",  # Collagen alpha-3(IV) chain
+    "P07202",  # Thyroid peroxidase
 ]
 
 label_df = summary_df[summary_df["IEDB_Protein_ID"].isin(highlight_ids)]
@@ -350,7 +451,7 @@ plt.scatter(
     facecolors="none",
     edgecolors="black",
     linewidths=1.2,
-    alpha=0.9
+    alpha=0.9,
 )
 
 texts = [
@@ -359,7 +460,12 @@ texts = [
         row["Mean_Normalized_Alignment_Score"],
         row["Epitope_Source"],
         fontsize=8,
-        bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.7)
+        bbox=dict(
+            boxstyle="round,pad=0.2",
+            facecolor="white",
+            edgecolor="none",
+            alpha=0.7,
+        ),
     )
     for _, row in label_df.iterrows()
 ]
@@ -369,21 +475,20 @@ adjust_text(
     x=label_df["Mean_Identity"].to_numpy(),
     y=label_df["Mean_Normalized_Alignment_Score"].to_numpy(),
     arrowprops=dict(
-        arrowstyle="-|>",
-        color="black",
-        lw=1.0,
-        alpha=0.8,
-        shrinkA=4,
-        shrinkB=4,
-        mutation_scale=10
+        arrowstyle="-",
+        color="gray",
+        lw=0.6,
+        alpha=0.45,
+        shrinkA=3,
+        shrinkB=3,
     ),
     force_text=(0.8, 0.8),
     force_points=(0.4, 0.4),
     expand_points=(1.3, 1.3),
-    expand_text=(1.2, 1.2)
+    expand_text=(1.2, 1.2),
 )
 
-plt.xlabel("Mean global percent identity, gaps included (%)")
+plt.xlabel("Mean global percent identity (%)")
 plt.ylabel("Mean normalized global alignment score")
 
 cbar = plt.colorbar(sc)
@@ -399,8 +504,13 @@ plt.legend(
     handles=size_handles,
     title="Mean query coverage",
     loc="best",
-    frameon=True
+    frameon=True,
 )
 
 plt.tight_layout()
+
+plot_path = DATA_DIR / "proccesed/global_alignment_summary_plot.png"
+plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+print(f"Saved plot to: {plot_path}")
+
 plt.show()

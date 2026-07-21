@@ -18,6 +18,38 @@ def load_input_data() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def prepare_epitopes(iedb_data: pd.DataFrame) -> list[tuple]:
+    """
+    Prepare IEDB epitopes for matching.
+
+    Epitopes without protein coordinates are removed because the downstream
+    IEDB-region assignment requires epitope_start_pos and epitope_end_pos.
+    """
+
+    iedb_data = iedb_data.copy()
+
+    iedb_data["epitope_start_pos"] = pd.to_numeric(
+        iedb_data["epitope_start_pos"],
+        errors="coerce"
+    )
+
+    iedb_data["epitope_end_pos"] = pd.to_numeric(
+        iedb_data["epitope_end_pos"],
+        errors="coerce"
+    )
+
+    before = len(iedb_data)
+
+    iedb_data = iedb_data.dropna(
+        subset=["epitope_start_pos", "epitope_end_pos"]
+    ).copy()
+
+    after = len(iedb_data)
+
+    print(f"Removed epitopes without protein coordinates: {before - after}")
+
+    iedb_data["epitope_start_pos"] = iedb_data["epitope_start_pos"].astype(int)
+    iedb_data["epitope_end_pos"] = iedb_data["epitope_end_pos"].astype(int)
+
     epitopes = list(
         zip(
             iedb_data["Assay_ID"],
@@ -38,8 +70,10 @@ def prepare_epitopes(iedb_data: pd.DataFrame) -> list[tuple]:
 
 def build_automaton(epitopes: list[tuple]) -> ahocorasick.Automaton:
     """
-    Build an Aho-Corasick automaton for efficient multi-pattern matching of epitope sequences.
-    Each epitope is added to the automaton with associated metadata for later retrieval.
+    Build an Aho-Corasick automaton for epitope-derived substrings.
+
+    Each epitope is split into all substrings from full epitope length down to
+    config["matching"]["min_match_length"].
     """
 
     min_match_len = config["matching"]["min_match_length"]
@@ -49,7 +83,19 @@ def build_automaton(epitopes: list[tuple]) -> ahocorasick.Automaton:
 
     total_kmers = 0
 
-    for assay_id, source, disease, disease_stage, prot_id, epitope, start, end, response, effector_cell in epitopes:
+    for (
+        assay_id,
+        source,
+        disease,
+        disease_stage,
+        prot_id,
+        epitope,
+        start,
+        end,
+        response,
+        effector_cell,
+    ) in epitopes:
+
         for length in range(len(epitope), min_match_len - 1, -1):
             for i in range(len(epitope) - length + 1):
 
@@ -64,10 +110,12 @@ def build_automaton(epitopes: list[tuple]) -> ahocorasick.Automaton:
                         disease,
                         disease_stage,
                         prot_id,
+                        epitope,
                         sub,
                         length,
                         start,
                         end,
+                        i,  # offset of substring inside the full IEDB epitope
                         response,
                         effector_cell,
                     )
@@ -83,20 +131,24 @@ def build_automaton(epitopes: list[tuple]) -> ahocorasick.Automaton:
     return automaton
 
 
-def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) -> pd.DataFrame:
+def find_matches(
+    pathogen_data: pd.DataFrame,
+    automaton: ahocorasick.Automaton,
+) -> pd.DataFrame:
     """
-    Use the Aho-Corasick automaton to find all matches of epitope sequences within 
-    the pathogen protein sequences. Each match is recorded with associated metadata
-    from both the pathogen data and the epitope data.
+    Find all exact substring matches in pathogen protein sequences.
+
+    Output is long format:
+    one row = one assay/epitope substring match to one pathogen protein.
     """
-    
+
     matches = []
 
     print("Matching sequences...")
 
     for row in tqdm(
         pathogen_data.itertuples(index=False),
-        total=len(pathogen_data)
+        total=len(pathogen_data),
     ):
         seq = row.Sequence
         pid = row.Protein_ID
@@ -114,16 +166,23 @@ def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) 
                 disease,
                 disease_stage,
                 ep_prot_id,
+                full_epitope,
                 sub,
                 match_len,
                 ep_start,
                 ep_end,
+                epitope_offset,
                 response,
-                effector_cell
+                effector_cell,
             ) in hit_list:
 
-                match_start = end_idx - match_len + 2  # 1-based
-                match_end = end_idx + 1
+                # 1-based coordinates on pathogen protein
+                pathogen_match_start = end_idx - match_len + 2
+                pathogen_match_end = end_idx + 1
+
+                # 1-based coordinates on original IEDB protein
+                iedb_match_start = ep_start + epitope_offset
+                iedb_match_end = iedb_match_start + match_len - 1
 
                 matches.append(
                     (
@@ -132,6 +191,7 @@ def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) 
                         disease,
                         disease_stage,
                         ep_prot_id,
+                        full_epitope,
                         pid,
                         proteome_id,
                         pathogen_organism,
@@ -141,12 +201,14 @@ def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) 
                         gene,
                         sub,
                         match_len,
-                        match_start,
-                        match_end,
+                        pathogen_match_start,
+                        pathogen_match_end,
                         ep_start,
                         ep_end,
+                        iedb_match_start,
+                        iedb_match_end,
                         response,
-                        effector_cell
+                        effector_cell,
                     )
                 )
 
@@ -158,6 +220,7 @@ def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) 
             "Disease",
             "Disease_stage",
             "IEDB_Protein_ID",
+            "IEDB_Epitope_Sequence",
             "Pathogen_Protein_ID",
             "Proteome_ID",
             "Pathogen_Organism",
@@ -171,15 +234,25 @@ def find_matches(pathogen_data: pd.DataFrame, automaton: ahocorasick.Automaton) 
             "Pathogen_End",
             "Epitope_Start",
             "Epitope_End",
+            "IEDB_Match_Start",
+            "IEDB_Match_End",
             "Response_measured",
-            "Effector_cell"
+            "Effector_cell",
         ],
     )
+
+    if not match_df.empty:
+        match_df["IEDB_Epitope_Length"] = match_df[
+            "IEDB_Epitope_Sequence"
+        ].str.len()
 
     return match_df
 
 
 def remove_exact_duplicate_matches(match_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove exact duplicate rows.
+    """
 
     n_duplicates = match_df.duplicated().sum()
 
@@ -191,146 +264,225 @@ def remove_exact_duplicate_matches(match_df: pd.DataFrame) -> pd.DataFrame:
     return match_df
 
 
-def keep_non_overlapping_hits(group: pd.DataFrame, min_sticking_out: int) -> tuple[pd.DataFrame, int]:
+def add_iedb_region_ids(match_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Removes a match only if the shorter of the two overlapping matches
-    sticks out by less than min_sticking_out amino acids.
-    """
-    group = group.sort_values(
-        ["Match_Length", "Pathogen_Start", "Pathogen_End"],
-        ascending=[False, True, True],
-    )
+    Add merged IEDB-region labels to the long match table.
 
-    kept_rows = []
-    kept_intervals = []
-    removed_count = 0
-
-    for _, row in group.iterrows():
-        start = row["Pathogen_Start"]
-        end = row["Pathogen_End"]
-        length = row["Match_Length"]
-
-        too_redundant = False
-
-        for kept_start, kept_end, kept_len in kept_intervals:
-            overlap = max(
-                0,
-                min(end, kept_end) - max(start, kept_start) + 1
-            )
-
-            if overlap == 0:
-                continue
-
-            shorter_len = min(length, kept_len)
-            sticking_out = shorter_len - overlap
-
-            if sticking_out < min_sticking_out:
-                too_redundant = True
-                break
-
-        if not too_redundant:
-            kept_rows.append(row)
-            kept_intervals.append((start, end, length))
-        else:
-            removed_count += 1
-
-    return pd.DataFrame(kept_rows), removed_count
-
-
-def remove_overlapping_matches(match_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Remove overlapping within defined groups of matches
-    based on the criteria defined in keep_non_overlapping_hits.
-
+    This preserves row-level traceability:
+    each row still links disease, assay, epitope, pathogen organism,
+    pathogen protein, matched sequence, and region ID.
     """
 
-    min_sticking_out = config["matching"]["overlap_min_sticking_out"]
+    match_df = match_df.copy()
 
-    print(f"Total matches before overlap filtering: {len(match_df)}")
+    region_labeled_groups = []
+
+    grouped = match_df.groupby("IEDB_Protein_ID", dropna=False, sort=False)
+
+    print(f"Adding IEDB-region IDs for {grouped.ngroups} IEDB proteins...")
+
+    for iedb_protein_id, group in grouped:
+        group = (
+            group
+            .dropna(subset=["IEDB_Match_Start", "IEDB_Match_End"])
+            .sort_values(["IEDB_Match_Start", "IEDB_Match_End"])
+            .copy()
+        )
+
+        if group.empty:
+            continue
+
+        running_end = group["IEDB_Match_End"].cummax()
+        previous_running_end = running_end.shift(fill_value=-1)
+
+        group["Region_Number"] = (
+            group["IEDB_Match_Start"] > previous_running_end + 1
+        ).cumsum()
+
+        group["IEDB_Region_Start"] = (
+            group
+            .groupby("Region_Number")["IEDB_Match_Start"]
+            .transform("min")
+        )
+
+        group["IEDB_Region_End"] = (
+            group
+            .groupby("Region_Number")["IEDB_Match_End"]
+            .transform("max")
+        )
+
+        group["IEDB_Region_Length"] = (
+            group["IEDB_Region_End"] - group["IEDB_Region_Start"] + 1
+        )
+
+        group["IEDB_Region_ID"] = (
+            group["IEDB_Protein_ID"].astype(str)
+            + ":"
+            + group["IEDB_Region_Start"].astype(int).astype(str)
+            + "-"
+            + group["IEDB_Region_End"].astype(int).astype(str)
+        )
+
+        region_labeled_groups.append(group)
+
+    if not region_labeled_groups:
+        return pd.DataFrame()
+
+    match_df_with_regions = pd.concat(region_labeled_groups, ignore_index=True)
+
+    print(f"Long region-labeled matches: {len(match_df_with_regions)}")
+
+    return match_df_with_regions
+
+
+def unique_list(series: pd.Series) -> list:
+    """
+    Return unique non-missing values while preserving order.
+    """
+
+    return list(dict.fromkeys(series.dropna().tolist()))
+
+def remove_nested(match_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove matches that add no new positional information.
+
+    Within each assay–IEDB protein–pathogen protein combination, a match is
+    removed only when both its pathogen interval and its IEDB interval are
+    fully contained within the corresponding intervals of the same retained
+    longer match.
+
+    This preserves matches that map the same pathogen region to a distinct
+    position in the IEDB protein, or vice versa.
+    """
+    print("Matches before nested filtering:", len(match_df))
 
     group_cols = [
         "Assay_ID",
+        "IEDB_Protein_ID",
         "Pathogen_Protein_ID",
         "Proteome_ID",
-        "Pathogen_Organism",
     ]
 
     grouped_results = []
-    total_removed = 0
 
-    for keys, group in match_df.groupby(group_cols, dropna=False, sort=False):
-        filtered_group, removed = keep_non_overlapping_hits(
-            group=group.copy(),
-            min_sticking_out=min_sticking_out,
-        )
-
-        total_removed += removed
-
-        for col, val in zip(
-            group_cols,
-            keys if isinstance(keys, tuple) else (keys,)
-        ):
-            filtered_group[col] = val
-
-        grouped_results.append(filtered_group)
-
-    match_df = pd.concat(grouped_results, ignore_index=True)
-
-    print(f"Total overlaps removed: {total_removed}")
-    print(f"Total matches after overlap filtering: {len(match_df)}")
-
-    return match_df
-
-
-def add_unmatched_epitopes(match_df: pd.DataFrame, iedb_data: pd.DataFrame) -> pd.DataFrame:
-    all_epitopes = (
-        iedb_data[
+    for _, group in match_df.groupby(
+        group_cols,
+        dropna=False,
+        sort=False,
+    ):
+        group_sorted = group.sort_values(
             [
-                "Assay_ID",
-                "Protein_source",
-                "Disease",
-                "Disease_stage",
-                "Protein_ID",
-                "Sequence",
-                "epitope_start_pos",
-                "epitope_end_pos",
-                "Response_measured",
-                "Effector_cell"
-            ]
-        ]
-        .rename(
-            columns={
-                "Protein_source": "Epitope_Source",
-                "Protein_ID": "IEDB_Protein_ID",
-            }
+                "Match_Length",
+                "Pathogen_Start",
+                "Pathogen_End",
+                "IEDB_Match_Start",
+                "IEDB_Match_End",
+            ],
+            ascending=[False, True, True, True, True],
         )
-        .drop_duplicates()
+
+        kept_rows = []
+        kept_matches = []
+
+        for _, row in group_sorted.iterrows():
+            pathogen_start = row["Pathogen_Start"]
+            pathogen_end = row["Pathogen_End"]
+            iedb_start = row["IEDB_Match_Start"]
+            iedb_end = row["IEDB_Match_End"]
+
+            is_nested = any(
+                pathogen_start >= kept["Pathogen_Start"]
+                and pathogen_end <= kept["Pathogen_End"]
+                and iedb_start >= kept["IEDB_Match_Start"]
+                and iedb_end <= kept["IEDB_Match_End"]
+                for kept in kept_matches
+            )
+
+            if is_nested:
+                continue
+
+            kept_rows.append(row)
+
+            kept_matches.append({
+                "Pathogen_Start": pathogen_start,
+                "Pathogen_End": pathogen_end,
+                "IEDB_Match_Start": iedb_start,
+                "IEDB_Match_End": iedb_end,
+            })
+
+        grouped_results.append(pd.DataFrame(kept_rows))
+
+    if grouped_results:
+        filtered_df = pd.concat(grouped_results, ignore_index=True)
+    else:
+        filtered_df = match_df.iloc[0:0].copy()
+
+    print("Matches after nested filtering:", len(filtered_df))
+
+    return filtered_df
+
+
+def summarize_regions(match_df_with_regions: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create a region-level summary from the long region-labeled match table.
+
+    This output is useful for overview plots, but biological traceback should
+    use the long table.
+    """
+
+    if match_df_with_regions.empty:
+        return pd.DataFrame()
+
+    print("Creating IEDB-region summary...")
+
+    list_cols = {
+        "Assay_ID": "Assay_IDs",
+        "Epitope_Source": "Epitope_Sources",
+        "Disease": "Diseases",
+        "Disease_stage": "Disease_stages",
+        "Response_measured": "Response_measured",
+        "Effector_cell": "Effector_cells",
+        "Pathogen_Protein_ID": "Pathogen_Protein_IDs",
+        "Proteome_ID": "Proteome_IDs",
+        "Pathogen_Organism": "Pathogen_Organisms",
+        "Pathogen_Scientific_name": "Pathogen_Scientific_names",
+        "Pathogen_Strain": "Pathogen_Strains",
+        "Pathogen_Annotation": "Pathogen_Annotations",
+        "Pathogen_Gene_Name": "Pathogen_Gene_Names",
+        "Matched_seq": "Matched_sequences",
+        "Match_Length": "Match_lengths",
+    }
+
+    region_df = (
+        match_df_with_regions
+        .groupby(
+            [
+                "IEDB_Protein_ID",
+                "IEDB_Region_ID",
+                "IEDB_Region_Start",
+                "IEDB_Region_End",
+                "IEDB_Region_Length",
+            ],
+            dropna=False,
+            sort=False,
+        )
+        .agg(
+            Number_of_supporting_matches=("Assay_ID", "size"),
+            Number_of_unique_assays=("Assay_ID", "nunique"),
+            Number_of_unique_pathogen_proteins=("Pathogen_Protein_ID", "nunique"),
+            Number_of_unique_proteomes=("Proteome_ID", "nunique"),
+            Number_of_unique_organisms=("Pathogen_Organism", "nunique"),
+            **{
+                new_col: (old_col, unique_list)
+                for old_col, new_col in list_cols.items()
+            },
+        )
+        .reset_index()
     )
 
-    full_result = all_epitopes.merge(
-        match_df,
-        how="left",
-        on=["Assay_ID",
-            "Epitope_Source",
-            "Disease",
-            "Disease_stage",
-            "IEDB_Protein_ID",
-            "Response_measured",
-            "Effector_cell"
-        ]
-    )
+    print(f"Total IEDB regions after merging: {len(region_df)}")
 
-    full_result["Matched"] = ~full_result["Pathogen_Protein_ID"].isna()
-
-    full_result.loc[full_result["Matched"], "Pathogen_End"] = (
-        full_result.loc[full_result["Matched"], "Pathogen_Start"]
-        + full_result.loc[full_result["Matched"], "Match_Length"]
-        - 1
-    )
-
-    print(full_result["Matched"].value_counts(dropna=False))
-
-    return full_result
+    return region_df
 
 
 def main() -> None:
@@ -343,23 +495,26 @@ def main() -> None:
 
     match_df = find_matches(
         pathogen_data=pathogen_data,
-        automaton=automaton
+        automaton=automaton,
     )
 
     print(f"Raw matches from Aho-Corasick: {len(match_df)}")
 
     match_df = remove_exact_duplicate_matches(match_df)
-    match_df = remove_overlapping_matches(match_df)
 
-    full_result = add_unmatched_epitopes(
-        match_df=match_df,
-        iedb_data=iedb_data
-    )
+    match_df = remove_nested(match_df)
 
-    output_path = DATA_DIR / "proccesed/perfect_matches_2_0.csv"
-    save_csv(full_result, output_path)
+    match_df_with_regions = add_iedb_region_ids(match_df)
 
-    print(f"Saved results to: {output_path}")
+    long_output_path = DATA_DIR / "proccesed/iedb_match_regions_long.csv"
+    save_csv(match_df_with_regions, long_output_path)
+    print(f"Saved region-labeled long matches to: {long_output_path}")
+
+    region_df = summarize_regions(match_df_with_regions)
+
+    summary_output_path = DATA_DIR / "proccesed/iedb_match_regions.csv"
+    save_csv(region_df, summary_output_path)
+    print(f"Saved region summary to: {summary_output_path}")
 
 
 if __name__ == "__main__":

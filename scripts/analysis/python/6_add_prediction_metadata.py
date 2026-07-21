@@ -38,23 +38,47 @@ def read_netsurfp_file(path) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=NETSURFP_COLS)
 
 
+def concat_csv_files(files, description: str) -> pd.DataFrame:
+    if not files:
+        raise FileNotFoundError(f"No files found for: {description}")
+
+    return pd.concat(
+        [pd.read_csv(file, dtype=str) for file in files],
+        ignore_index=True
+    )
+
+
+def concat_netsurfp_files(files, description: str) -> pd.DataFrame:
+    if not files:
+        raise FileNotFoundError(f"No files found for: {description}")
+
+    return pd.concat(
+        [read_netsurfp_file(file) for file in files],
+        ignore_index=True
+    )
+
+
 def load_prediction_inputs():
     netsurfp_dir = DATA_DIR / "raw" / "netsurfp"
     deeploc_dir = DATA_DIR / "raw" / "deeploc"
 
-    print("Loading perfect match results...")
-    perfect_match = load_csv(DATA_DIR / "proccesed/perfect_matches_2_0.csv")
+    print("Loading region-labeled long match results...")
+    match_df = load_csv(DATA_DIR / "proccesed/iedb_match_regions_long.csv")
 
-    perfect_match["Matched"] = (
-        perfect_match["Matched"]
-        .astype(str)
-        .str.lower()
-        .eq("true")
-    )
+    print("Loading pathogen protein metadata...")
+    protein_meta = load_csv(DATA_DIR / "intermediate/protein_metadata.csv")
+
+    print("Loading IEDB metadata...")
+    iedb_data = load_csv(DATA_DIR / "intermediate/wrangled_IEDB.csv")
 
     print("Loading NetSurfP IEDB predictions...")
     netsurfp_iedb_files = sorted(
         netsurfp_dir.glob("netsurfp_IEDB_prediction_*.csv")
+    )
+
+    netsurfp_iedb = concat_netsurfp_files(
+        netsurfp_iedb_files,
+        "NetSurfP IEDB predictions"
     )
 
     print("Loading NetSurfP pathogen predictions...")
@@ -62,14 +86,9 @@ def load_prediction_inputs():
         netsurfp_dir.glob("netsurfp_pathogen_prediction_*.csv")
     )
 
-    netsurfp_pathogen = pd.concat(
-        [read_netsurfp_file(file) for file in netsurfp_pathogen_files],
-        ignore_index=True
-    )
-
-    netsurfp_iedb = pd.concat(
-        [read_netsurfp_file(file) for file in netsurfp_iedb_files],
-        ignore_index=True
+    netsurfp_pathogen = concat_netsurfp_files(
+        netsurfp_pathogen_files,
+        "NetSurfP pathogen predictions"
     )
 
     print("Loading DeepLoc IEDB predictions...")
@@ -83,46 +102,106 @@ def load_prediction_inputs():
         deeploc_dir.glob("deeplocpro_prediction_*.csv")
     )
 
-    deeploc_pathogen = pd.concat(
-        [pd.read_csv(file, dtype=str) for file in deeploc_pathogen_files],
-        ignore_index=True
+    deeploc_pathogen = concat_csv_files(
+        deeploc_pathogen_files,
+        "DeepLoc pathogen predictions"
     )
 
-    return perfect_match, netsurfp_iedb, netsurfp_pathogen, deeploc_iedb, deeploc_pathogen
+    return (
+        match_df,
+        protein_meta,
+        iedb_data,
+        netsurfp_iedb,
+        netsurfp_pathogen,
+        deeploc_iedb,
+        deeploc_pathogen,
+    )
 
 
 def clean_prediction_ids(
-    perfect_match: pd.DataFrame,
+    match_df: pd.DataFrame,
+    protein_meta: pd.DataFrame,
+    iedb_data: pd.DataFrame,
     netsurfp_iedb: pd.DataFrame,
     netsurfp_pathogen: pd.DataFrame,
     deeploc_iedb: pd.DataFrame,
     deeploc_pathogen: pd.DataFrame,
 ):
-    perfect_match = perfect_match.copy()
+    match_df = match_df.copy()
+    protein_meta = protein_meta.copy()
+    iedb_data = iedb_data.copy()
     netsurfp_iedb = netsurfp_iedb.copy()
     netsurfp_pathogen = netsurfp_pathogen.copy()
     deeploc_iedb = deeploc_iedb.copy()
     deeploc_pathogen = deeploc_pathogen.copy()
 
-    for df in [deeploc_pathogen, deeploc_iedb, netsurfp_pathogen, netsurfp_iedb]:
+    for df in [
+        match_df,
+        protein_meta,
+        iedb_data,
+        netsurfp_iedb,
+        netsurfp_pathogen,
+        deeploc_iedb,
+        deeploc_pathogen,
+    ]:
         df.columns = df.columns.str.strip()
         df.drop(
             columns=df.columns[df.columns.str.contains("^Unnamed")],
             inplace=True
         )
 
-    perfect_match["Pathogen_Protein_ID_clean"] = (
-        perfect_match["Pathogen_Protein_ID"]
+    match_df["Pathogen_Protein_ID_clean"] = (
+        match_df["Pathogen_Protein_ID"]
         .astype("string")
         .str.strip()
         .str.upper()
     )
 
-    perfect_match["IEDB_Protein_ID_clean"] = (
-        perfect_match["IEDB_Protein_ID"]
+    match_df["IEDB_Protein_ID_clean"] = (
+        match_df["IEDB_Protein_ID"]
         .astype("string")
         .str.strip()
         .str.upper()
+    )
+
+    if "Proteome_ID" in match_df.columns:
+        match_df["Proteome_ID"] = (
+            match_df["Proteome_ID"]
+            .astype("string")
+            .str.strip()
+        )
+
+    protein_meta["Protein_ID_clean"] = (
+        protein_meta["Protein_ID"]
+        .astype("string")
+        .str.strip()
+        .str.upper()
+    )
+
+    if "Proteome_ID" in protein_meta.columns:
+        protein_meta["Proteome_ID"] = (
+            protein_meta["Proteome_ID"]
+            .astype("string")
+            .str.strip()
+        )
+
+    iedb_data["Protein_ID_clean"] = (
+        iedb_data["Protein_ID"]
+        .astype("string")
+        .str.strip()
+        .str.upper()
+    )
+
+    iedb_data["Assay_ID"] = (
+        iedb_data["Assay_ID"]
+        .astype("string")
+        .str.strip()
+    )
+
+    match_df["Assay_ID"] = (
+        match_df["Assay_ID"]
+        .astype("string")
+        .str.strip()
     )
 
     netsurfp_iedb["Protein_ID_clean"] = (
@@ -153,35 +232,141 @@ def clean_prediction_ids(
         .str.upper()
     )
 
-    return perfect_match, netsurfp_iedb, netsurfp_pathogen, deeploc_iedb, deeploc_pathogen
+    return (
+        match_df,
+        protein_meta,
+        iedb_data,
+        netsurfp_iedb,
+        netsurfp_pathogen,
+        deeploc_iedb,
+        deeploc_pathogen,
+    )
+
+
+def add_input_metadata(
+    match_df: pd.DataFrame,
+    protein_meta: pd.DataFrame,
+    iedb_data: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Add metadata that is not already present in the match table.
+    """
+    match_df = match_df.copy()
+    protein_meta = protein_meta.copy()
+    iedb_data = iedb_data.copy()
+
+    # ------------------------------------------------------------
+    # Pathogen protein length
+    # ------------------------------------------------------------
+    pathogen_meta = protein_meta[
+        [
+            "Protein_ID_clean",
+            "Proteome_ID",
+            "Sequence",
+        ]
+    ].copy()
+
+    pathogen_meta["Pathogen_Protein_Length"] = (
+        pathogen_meta["Sequence"]
+        .astype("string")
+        .str.len()
+    )
+
+    pathogen_meta = (
+        pathogen_meta
+        .drop(columns="Sequence")
+        .drop_duplicates(
+            subset=["Protein_ID_clean", "Proteome_ID"]
+        )
+    )
+
+    before_rows = len(match_df)
+
+    match_df = (
+        match_df
+        .merge(
+            pathogen_meta,
+            how="left",
+            left_on=["Pathogen_Protein_ID_clean", "Proteome_ID"],
+            right_on=["Protein_ID_clean", "Proteome_ID"],
+            validate="many_to_one",
+        )
+        .drop(columns="Protein_ID_clean")
+    )
+
+    if len(match_df) != before_rows:
+        raise RuntimeError(
+            "Pathogen metadata merge changed the number of match rows."
+        )
+
+    # ------------------------------------------------------------
+    # IEDB MHC restriction
+    # ------------------------------------------------------------
+    iedb_meta = (
+        iedb_data[
+            [
+                "Assay_ID",
+                "MHC_restriction",
+            ]
+        ]
+        .drop_duplicates(subset="Assay_ID")
+    )
+
+    before_rows = len(match_df)
+
+    match_df = match_df.merge(
+        iedb_meta,
+        how="left",
+        on="Assay_ID",
+        validate="many_to_one",
+    )
+
+    if len(match_df) != before_rows:
+        raise RuntimeError(
+            "IEDB metadata merge changed the number of match rows."
+        )
+
+    return match_df
 
 
 def check_prediction_coverage(
-    perfect_match: pd.DataFrame,
+    match_df: pd.DataFrame,
     netsurfp_iedb: pd.DataFrame,
     netsurfp_pathogen: pd.DataFrame,
     deeploc_iedb: pd.DataFrame,
     deeploc_pathogen: pd.DataFrame,
 ) -> None:
     matched_iedb_ids = set(
-        perfect_match.loc[
-            perfect_match["Matched"],
-            "IEDB_Protein_ID_clean"
-        ].dropna()
+        match_df["IEDB_Protein_ID_clean"]
+        .dropna()
+        .tolist()
     )
 
     matched_pathogen_ids = set(
-        perfect_match.loc[
-            perfect_match["Matched"],
-            "Pathogen_Protein_ID_clean"
-        ].dropna()
+        match_df["Pathogen_Protein_ID_clean"]
+        .dropna()
+        .tolist()
     )
 
-    missing_netsurfp_iedb = matched_iedb_ids - set(netsurfp_iedb["Protein_ID_clean"].dropna())
-    missing_netsurfp_pathogen = matched_pathogen_ids - set(netsurfp_pathogen["Protein_ID_clean"].dropna())
+    missing_netsurfp_iedb = (
+        matched_iedb_ids -
+        set(netsurfp_iedb["Protein_ID_clean"].dropna())
+    )
 
-    missing_deeploc_iedb = matched_iedb_ids - set(deeploc_iedb["Protein_ID_clean"].dropna())
-    missing_deeploc_pathogen = matched_pathogen_ids - set(deeploc_pathogen["Protein_ID_clean"].dropna())
+    missing_netsurfp_pathogen = (
+        matched_pathogen_ids -
+        set(netsurfp_pathogen["Protein_ID_clean"].dropna())
+    )
+
+    missing_deeploc_iedb = (
+        matched_iedb_ids -
+        set(deeploc_iedb["Protein_ID_clean"].dropna())
+    )
+
+    missing_deeploc_pathogen = (
+        matched_pathogen_ids -
+        set(deeploc_pathogen["Protein_ID_clean"].dropna())
+    )
 
     print("Expected matched IEDB proteins:", len(matched_iedb_ids))
     print("Expected matched pathogen proteins:", len(matched_pathogen_ids))
@@ -192,18 +377,37 @@ def check_prediction_coverage(
     print("\nMissing from DeepLoc IEDB:", len(missing_deeploc_iedb))
     print("Missing from DeepLoc pathogen:", len(missing_deeploc_pathogen))
 
-    missing_netsurfp_pathogen_df = pd.DataFrame({
-        "Pathogen_Protein_ID": sorted(missing_netsurfp_pathogen)
-    })
+    save_csv(
+        pd.DataFrame({
+            "IEDB_Protein_ID": sorted(missing_netsurfp_iedb)
+        }),
+        DATA_DIR / "proccesed/missing_netsurfp_iedb_ids.csv"
+    )
 
     save_csv(
-        missing_netsurfp_pathogen_df,
+        pd.DataFrame({
+            "Pathogen_Protein_ID": sorted(missing_netsurfp_pathogen)
+        }),
         DATA_DIR / "proccesed/missing_netsurfp_pathogen_ids.csv"
+    )
+
+    save_csv(
+        pd.DataFrame({
+            "IEDB_Protein_ID": sorted(missing_deeploc_iedb)
+        }),
+        DATA_DIR / "proccesed/missing_deeploc_iedb_ids.csv"
+    )
+
+    save_csv(
+        pd.DataFrame({
+            "Pathogen_Protein_ID": sorted(missing_deeploc_pathogen)
+        }),
+        DATA_DIR / "proccesed/missing_deeploc_pathogen_ids.csv"
     )
 
 
 def add_deeploc_metadata(
-    perfect_match: pd.DataFrame,
+    match_df: pd.DataFrame,
     deeploc_iedb: pd.DataFrame,
     deeploc_pathogen: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -221,8 +425,8 @@ def add_deeploc_metadata(
         .rename(columns={"Localization": "pathogen_prot_location"})
     )
 
-    perfect_match_meta = (
-        perfect_match
+    match_df_meta = (
+        match_df
         .merge(
             pathogen_location_meta,
             how="left",
@@ -234,16 +438,15 @@ def add_deeploc_metadata(
             iedb_location_meta,
             how="left",
             left_on="IEDB_Protein_ID_clean",
-            right_on="Protein_ID_clean"
-        )
+            right_on="Protein_ID_clean")
         .drop(columns=["Protein_ID_clean"])
     )
 
-    return perfect_match_meta
+    return match_df_meta
 
 
 def prepare_numeric_columns(
-    perfect_match_meta: pd.DataFrame,
+    match_df_meta: pd.DataFrame,
     netsurfp_iedb: pd.DataFrame,
     netsurfp_pathogen: pd.DataFrame,
 ):
@@ -251,122 +454,225 @@ def prepare_numeric_columns(
         df["n"] = pd.to_numeric(df["n"], errors="coerce")
         df["rsa"] = pd.to_numeric(df["rsa"], errors="coerce")
 
-    for col in ["Pathogen_Start", "Pathogen_End", "Epitope_Start", "Epitope_End"]:
-        perfect_match_meta[col] = pd.to_numeric(
-            perfect_match_meta[col],
+    coordinate_cols = [
+        "Pathogen_Start",
+        "Pathogen_End",
+        "Epitope_Start",
+        "Epitope_End",
+        "IEDB_Match_Start",
+        "IEDB_Match_End",
+        "IEDB_Region_Start",
+        "IEDB_Region_End",
+    ]
+
+    for col in coordinate_cols:
+        if col in match_df_meta.columns:
+            match_df_meta[col] = pd.to_numeric(
+                match_df_meta[col],
+                errors="coerce"
+            )
+
+    if "Pathogen_Metadata_Protein_Length" in match_df_meta.columns:
+        match_df_meta["Pathogen_Metadata_Protein_Length"] = pd.to_numeric(
+            match_df_meta["Pathogen_Metadata_Protein_Length"],
             errors="coerce"
         )
 
-    return perfect_match_meta, netsurfp_iedb, netsurfp_pathogen
+    return match_df_meta, netsurfp_iedb, netsurfp_pathogen
+
+
+def build_rsa_lookup(netsurfp_df: pd.DataFrame) -> dict:
+    """
+    Build lookup:
+        Protein_ID_clean -> residue-level RSA table
+
+    This avoids huge row expansion from merging every match row
+    with every residue row for the same protein.
+    """
+    netsurfp_df = netsurfp_df.dropna(
+        subset=["Protein_ID_clean", "n", "rsa"]
+    ).copy()
+
+    rsa_lookup = {}
+
+    for protein_id, group in netsurfp_df.groupby("Protein_ID_clean"):
+        rsa_lookup[protein_id] = (
+            group[["n", "rsa"]]
+            .sort_values("n")
+            .reset_index(drop=True)
+        )
+
+    return rsa_lookup
+
+
+def mean_rsa_for_region(
+    rsa_lookup: dict,
+    protein_id,
+    start,
+    end,
+):
+    if pd.isna(protein_id) or pd.isna(start) or pd.isna(end):
+        return None
+
+    protein_id = str(protein_id).strip().upper()
+
+    if protein_id not in rsa_lookup:
+        return None
+
+    try:
+        start = int(start)
+        end = int(end)
+    except ValueError:
+        return None
+
+    if start > end:
+        start, end = end, start
+
+    rsa_df = rsa_lookup[protein_id]
+
+    region_rsa = rsa_df.loc[
+        rsa_df["n"].between(start, end),
+        "rsa"
+    ]
+
+    if region_rsa.empty:
+        return None
+
+    return region_rsa.mean()
 
 
 def add_rsa_metadata(
-    perfect_match_meta: pd.DataFrame,
+    match_df_meta: pd.DataFrame,
     netsurfp_iedb: pd.DataFrame,
     netsurfp_pathogen: pd.DataFrame,
 ) -> pd.DataFrame:
-    perfect_match_meta = perfect_match_meta.reset_index(drop=True)
-    perfect_match_meta["match_row_id"] = perfect_match_meta.index
+    match_df_meta = match_df_meta.copy()
 
-    pathogen_regions = perfect_match_meta[
-        [
-            "match_row_id",
-            "Pathogen_Protein_ID_clean",
-            "Pathogen_Start",
-            "Pathogen_End",
-        ]
-    ].dropna()
+    print("Building NetSurfP RSA lookup tables...")
 
-    pathogen_rsa = pathogen_regions.merge(
-        netsurfp_pathogen[["Protein_ID_clean", "n", "rsa"]],
-        how="left",
-        left_on="Pathogen_Protein_ID_clean",
-        right_on="Protein_ID_clean"
-    )
+    pathogen_rsa_lookup = build_rsa_lookup(netsurfp_pathogen)
+    iedb_rsa_lookup = build_rsa_lookup(netsurfp_iedb)
 
-    pathogen_rsa = pathogen_rsa[
-        pathogen_rsa["n"].between(
-            pathogen_rsa["Pathogen_Start"],
-            pathogen_rsa["Pathogen_End"]
+    print("Adding pathogen matched-peptide RSA means...")
+
+    match_df_meta["rsa_pathogen_peptide_mean"] = [
+        mean_rsa_for_region(
+            rsa_lookup=pathogen_rsa_lookup,
+            protein_id=protein_id,
+            start=start,
+            end=end,
+        )
+        for protein_id, start, end in zip(
+            match_df_meta["Pathogen_Protein_ID_clean"],
+            match_df_meta["Pathogen_Start"],
+            match_df_meta["Pathogen_End"],
         )
     ]
 
-    pathogen_rsa_summary = (
-        pathogen_rsa
-        .groupby("match_row_id")["rsa"]
-        .mean()
-        .reset_index(name="rsa_pathogen_peptide_mean")
-    )
+    print("Adding IEDB matched-region RSA means...")
 
-    iedb_regions = perfect_match_meta[
-        [
-            "match_row_id",
-            "IEDB_Protein_ID_clean",
-            "Epitope_Start",
-            "Epitope_End",
-        ]
-    ].dropna()
-
-    iedb_rsa = iedb_regions.merge(
-        netsurfp_iedb[["Protein_ID_clean", "n", "rsa"]],
-        how="left",
-        left_on="IEDB_Protein_ID_clean",
-        right_on="Protein_ID_clean"
-    )
-
-    iedb_rsa = iedb_rsa[
-        iedb_rsa["n"].between(
-            iedb_rsa["Epitope_Start"],
-            iedb_rsa["Epitope_End"]
+    match_df_meta["rsa_iedb_matched_region_mean"] = [
+        mean_rsa_for_region(
+            rsa_lookup=iedb_rsa_lookup,
+            protein_id=protein_id,
+            start=start,
+            end=end,
+        )
+        for protein_id, start, end in zip(
+            match_df_meta["IEDB_Protein_ID_clean"],
+            match_df_meta["IEDB_Match_Start"],
+            match_df_meta["IEDB_Match_End"],
         )
     ]
 
-    iedb_rsa_summary = (
-        iedb_rsa
-        .groupby("match_row_id")["rsa"]
-        .mean()
-        .reset_index(name="rsa_epitope_mean")
+    print("Adding full IEDB epitope RSA means...")
+
+    match_df_meta["rsa_epitope_mean"] = [
+        mean_rsa_for_region(
+            rsa_lookup=iedb_rsa_lookup,
+            protein_id=protein_id,
+            start=start,
+            end=end,
+        )
+        for protein_id, start, end in zip(
+            match_df_meta["IEDB_Protein_ID_clean"],
+            match_df_meta["Epitope_Start"],
+            match_df_meta["Epitope_End"],
+        )
+    ]
+
+    return match_df_meta
+
+
+def print_final_diagnostics(match_df_meta: pd.DataFrame) -> None:
+    print("Rows:", len(match_df_meta))
+
+    print("\nUnique IDs:")
+    print(
+        "Unique pathogen proteins:",
+        match_df_meta["Pathogen_Protein_ID_clean"].nunique()
+    )
+    print(
+        "Unique IEDB proteins:",
+        match_df_meta["IEDB_Protein_ID_clean"].nunique()
     )
 
-    perfect_match_meta = (
-        perfect_match_meta
-        .merge(pathogen_rsa_summary, how="left", on="match_row_id")
-        .merge(iedb_rsa_summary, how="left", on="match_row_id")
-        .drop(columns=["match_row_id"])
-    )
+    if "Assay_ID" in match_df_meta.columns:
+        print("Unique assays:", match_df_meta["Assay_ID"].nunique())
 
-    return perfect_match_meta
+    if "IEDB_Region_ID" in match_df_meta.columns:
+        print("Unique IEDB regions:", match_df_meta["IEDB_Region_ID"].nunique())
 
+    print("\nInput metadata merge coverage:")
 
-def print_final_diagnostics(perfect_match_meta: pd.DataFrame) -> None:
-    print("Rows:", len(perfect_match_meta))
+    if "Pathogen_Metadata_Genus_species" in match_df_meta.columns:
+        print(
+            "Pathogen genus/species missing:",
+            match_df_meta["Pathogen_Metadata_Genus_species"].isna().sum()
+        )
+
+    if "Pathogen_Metadata_Protein_Length" in match_df_meta.columns:
+        print(
+            "Pathogen protein length missing:",
+            match_df_meta["Pathogen_Metadata_Protein_Length"].isna().sum()
+        )
+
+    if "IEDB_Metadata_MHC_restriction" in match_df_meta.columns:
+        print(
+            "IEDB MHC restriction missing:",
+            match_df_meta["IEDB_Metadata_MHC_restriction"].isna().sum()
+        )
 
     print("\nDeepLoc merge coverage:")
     print(
         "Pathogen location missing:",
-        perfect_match_meta["pathogen_prot_location"].isna().sum()
+        match_df_meta["pathogen_prot_location"].isna().sum()
     )
     print(
         "IEDB location missing:",
-        perfect_match_meta["IEDB_prot_location"].isna().sum()
+        match_df_meta["IEDB_prot_location"].isna().sum()
     )
 
     print("\nNetSurfP RSA coverage:")
     print(
-        "Pathogen RSA missing:",
-        perfect_match_meta["rsa_pathogen_peptide_mean"].isna().sum()
+        "Pathogen matched peptide RSA missing:",
+        match_df_meta["rsa_pathogen_peptide_mean"].isna().sum()
     )
     print(
-        "IEDB RSA missing:",
-        perfect_match_meta["rsa_epitope_mean"].isna().sum()
+        "IEDB matched region RSA missing:",
+        match_df_meta["rsa_iedb_matched_region_mean"].isna().sum()
     )
-
-    print(perfect_match_meta["Matched"].value_counts(dropna=False))
+    print(
+        "IEDB full epitope RSA missing:",
+        match_df_meta["rsa_epitope_mean"].isna().sum()
+    )
 
 
 def main() -> None:
     (
-        perfect_match,
+        match_df,
+        protein_meta,
+        iedb_data,
         netsurfp_iedb,
         netsurfp_pathogen,
         deeploc_iedb,
@@ -374,49 +680,59 @@ def main() -> None:
     ) = load_prediction_inputs()
 
     (
-        perfect_match,
+        match_df,
+        protein_meta,
+        iedb_data,
         netsurfp_iedb,
         netsurfp_pathogen,
         deeploc_iedb,
         deeploc_pathogen,
     ) = clean_prediction_ids(
-        perfect_match,
+        match_df,
+        protein_meta,
+        iedb_data,
         netsurfp_iedb,
         netsurfp_pathogen,
         deeploc_iedb,
         deeploc_pathogen,
+    )
+
+    match_df = add_input_metadata(
+        match_df=match_df,
+        protein_meta=protein_meta,
+        iedb_data=iedb_data,
     )
 
     check_prediction_coverage(
-        perfect_match,
+        match_df,
         netsurfp_iedb,
         netsurfp_pathogen,
         deeploc_iedb,
         deeploc_pathogen,
     )
 
-    perfect_match_meta = add_deeploc_metadata(
-        perfect_match,
+    match_df_meta = add_deeploc_metadata(
+        match_df,
         deeploc_iedb,
         deeploc_pathogen,
     )
 
-    perfect_match_meta, netsurfp_iedb, netsurfp_pathogen = prepare_numeric_columns(
-        perfect_match_meta,
+    match_df_meta, netsurfp_iedb, netsurfp_pathogen = prepare_numeric_columns(
+        match_df_meta,
         netsurfp_iedb,
         netsurfp_pathogen,
     )
 
-    perfect_match_meta = add_rsa_metadata(
-        perfect_match_meta,
+    match_df_meta = add_rsa_metadata(
+        match_df_meta,
         netsurfp_iedb,
         netsurfp_pathogen,
     )
 
-    print_final_diagnostics(perfect_match_meta)
+    print_final_diagnostics(match_df_meta)
 
-    output_path = DATA_DIR / "proccesed/perfect_match_DN_add.csv"
-    save_csv(perfect_match_meta, output_path)
+    output_path = (DATA_DIR / "proccesed/iedb_match_regions_long_metadata.csv")
+    save_csv(match_df_meta, output_path)
 
     print(f"Saved: {output_path}")
 
