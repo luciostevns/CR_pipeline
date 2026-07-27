@@ -1,4 +1,3 @@
-from email import header
 import re
 
 import pandas as pd
@@ -9,12 +8,11 @@ from crossreactivity.io import DATA_DIR, load_csv, save_csv
 
 
 def load_input_data():
-    print("Loading combined FASTA file...")
+
     fasta_records = list(
         SeqIO.parse(DATA_DIR / "raw/all_proteomes.fasta", "fasta")
     )
 
-    print("Loading pathogenic proteome metadata...")
     pathogenic_df = load_csv(
         DATA_DIR / "intermediate/pathogenic_bacteria_proteome.csv"
     )
@@ -68,8 +66,6 @@ def parse_fasta_to_df(fasta_records, dataset_name: str) -> pd.DataFrame:
     """
     metadata = []
 
-    print(f"Processing {dataset_name}...")
-
     for seq_record in tqdm(
         fasta_records,
         desc=f"Parsing {dataset_name}",
@@ -117,7 +113,6 @@ def parse_fasta_to_df(fasta_records, dataset_name: str) -> pd.DataFrame:
 
 
 def merge_proteome_metadata(protein_df: pd.DataFrame, pathogenic_df: pd.DataFrame) -> pd.DataFrame:
-    print("Merging in proteome-level metadata...")
 
     protein_metadata_df = protein_df.merge(
         pathogenic_df[
@@ -152,66 +147,282 @@ def filter_rows_without_strain(protein_metadata_df: pd.DataFrame) -> pd.DataFram
 
     return protein_metadata_df
 
+def remove_duplicate_proteins(
+    protein_metadata_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Remove duplicate proteins and identify occurrences across species/genera."""
+    print("Checking for duplicate proteins...")
 
-def print_diagnostics(protein_metadata_df: pd.DataFrame) -> None:
-    print("\nMissing values after merge:")
-    print(
-        protein_metadata_df[
-            ["Scientific_name", "Genus_species", "Strain"]
-        ].isna().sum()
+    protein_metadata_df = protein_metadata_df.copy()
+
+    keys = pd.DataFrame(
+        {
+            "protein": pd.factorize(
+                protein_metadata_df["Protein_ID"]
+            )[0],
+            "sequence": pd.factorize(
+                protein_metadata_df["Sequence"]
+            )[0],
+            "species": pd.factorize(
+                protein_metadata_df["Genus_species"]
+            )[0],
+        },
+        index=protein_metadata_df.index,
     )
 
-    print(f"\nTotal proteins(rows): {len(protein_metadata_df)}")
-    print(f"\nTotal unique values per column:\n{protein_metadata_df.nunique()}")
+    protein_key = ["protein", "sequence"]
+    duplicate_key = protein_key + ["species"]
 
-    n_unique_rows = protein_metadata_df.drop_duplicates().shape[0]
-    print(f"\nUnique rows (all columns): {n_unique_rows}")
+    # Identify and remove repeated rows within the same species
+    duplicated = keys.duplicated(duplicate_key, keep=False)
+    keep_mask = ~keys.duplicated(duplicate_key, keep="first")
 
-def print_duplicate_diagnostics(protein_metadata_df: pd.DataFrame) -> None:
-    print("\nDuplicate diagnostics:")
+    result = protein_metadata_df.loc[keep_mask].copy()
+    retained_keys = keys.loc[keep_mask].copy()
 
-    duplicate_protein_id_rows = protein_metadata_df.duplicated(
-        subset=["Protein_ID"],
-        keep=False,
-    ).sum()
+    retained_keys["genus"] = pd.factorize(
+        result["Genus_species"].str.split().str[0]
+    )[0]
 
-    duplicate_protein_proteome_rows = protein_metadata_df.duplicated(
-        subset=["Protein_ID", "Proteome_ID"],
-        keep=False,
-    ).sum()
+    groups = retained_keys.groupby(protein_key, sort=False)
 
-    duplicate_full_rows = protein_metadata_df.duplicated().sum()
+    # Same Protein_ID + Sequence occurring in multiple species/genera
+    cross_species_mask = groups["species"].transform("size").gt(1)
+    cross_genus_mask = groups["genus"].transform("nunique").gt(1)
+    first_occurrence = ~retained_keys.duplicated(protein_key)
 
-    print(f"Rows with duplicated Protein_ID: {duplicate_protein_id_rows}")
-    print(f"Rows with duplicated Protein_ID + Proteome_ID: {duplicate_protein_proteome_rows}")
-    print(f"Fully duplicated rows: {duplicate_full_rows}")
-
-    print("\nMost duplicated Protein_IDs:")
-    print(
-        protein_metadata_df["Protein_ID"]
-        .value_counts()
-        .head(20)
+    # Repeated rows found only within one species
+    same_species_mask = (
+        duplicated.loc[keep_mask].to_numpy()
+        & ~cross_species_mask.to_numpy()
     )
 
-    print("\nExample duplicated Protein_ID rows:")
-    duplicated_examples = protein_metadata_df[
-        protein_metadata_df.duplicated(subset=["Protein_ID"], keep=False)
-    ].sort_values("Protein_ID")
+    result["Duplicate_across_genus_species"] = (
+        cross_species_mask.to_numpy()
+    )
+    result["Duplicate_across_genera"] = (
+        cross_genus_mask.to_numpy()
+    )
 
     print(
-        duplicated_examples[
-            [
-                "Protein_ID",
-                "Proteome_ID",
-                "Scientific_name",
+        f"Removed duplicate protein rows: "
+        f"{len(protein_metadata_df) - len(result):,}"
+    )
+    print(
+        f"Unique combinations duplicated within one Genus_species: "
+        f"{same_species_mask.sum():,}"
+    )
+    print(
+        f"Unique combinations occurring across Genus_species: "
+        f"{(cross_species_mask & first_occurrence).sum():,}"
+    )
+    print(
+        f"Unique combinations occurring across genera: "
+        f"{(cross_genus_mask & first_occurrence).sum():,}"
+    )
+
+    columns = ["Protein_ID", "Sequence", "Genus_species"]
+
+    print("\nFive within-species examples:")
+    print(
+        result.loc[same_species_mask, columns]
+        .assign(Sequence=lambda x: x["Sequence"].str[:30] + "...")
+        .head(5)
+        .to_string(index=False)
+    )
+
+    example_keys = retained_keys.loc[
+        cross_species_mask & first_occurrence,
+        protein_key,
+    ].head(5)
+
+    selected = pd.MultiIndex.from_frame(example_keys)
+    all_retained_keys = pd.MultiIndex.from_frame(
+        retained_keys[protein_key]
+    )
+
+    cross_examples = (
+        result.loc[all_retained_keys.isin(selected), columns]
+        .groupby(
+            ["Protein_ID", "Sequence"],
+            sort=False,
+            dropna=False,
+        )
+        .agg(
+            Genus_species=(
                 "Genus_species",
-                "Strain",
-                "Annotation",
-                "Gene_name",
-                "Sequence",
-            ]
-        ].tail(10)
+                lambda x: ", ".join(x.dropna().unique()),
+            )
+        )
+        .reset_index()
+        .assign(Sequence=lambda x: x["Sequence"].str[:30] + "...")
     )
+
+    print("\nFive cross-species examples:")
+    print(cross_examples.to_string(index=False))
+
+    genus_example_keys = retained_keys.loc[
+        cross_genus_mask & first_occurrence,
+        protein_key,
+    ].head(5)
+
+    selected = pd.MultiIndex.from_frame(genus_example_keys)
+
+    cross_genus_examples = (
+        result.loc[all_retained_keys.isin(selected), columns]
+        .groupby(
+            ["Protein_ID", "Sequence"],
+            sort=False,
+            dropna=False,
+        )
+        .agg(
+            n_species=("Genus_species", "nunique"),
+            genera=(
+                "Genus_species",
+                lambda x: ", ".join(
+                    sorted(
+                        x.dropna()
+                        .str.split()
+                        .str[0]
+                        .unique()
+                    )
+                ),
+            ),
+        )
+        .reset_index()
+        .assign(Sequence=lambda x: x["Sequence"].str[:30] + "...")
+    )
+
+    print("\nFive cross-genus examples:")
+    print(cross_genus_examples.to_string(index=False))
+
+    # Get the Protein_ID + Sequence combinations occurring
+    # across species and across genera.
+    cross_species_keys = (
+        retained_keys.loc[cross_species_mask, protein_key]
+        .drop_duplicates()
+    )
+
+    cross_genus_keys = (
+        retained_keys.loc[cross_genus_mask, protein_key]
+        .drop_duplicates()
+    )
+
+    # Apply these keys to the original dataframe so annotations
+    # are also collected from rows removed as duplicates.
+    original_keys = pd.MultiIndex.from_frame(
+        keys[protein_key]
+    )
+    species_keys = pd.MultiIndex.from_frame(
+        cross_species_keys
+    )
+    genus_keys = pd.MultiIndex.from_frame(
+        cross_genus_keys
+    )
+
+    original_cross_species_mask = original_keys.isin(
+        species_keys
+    )
+    original_cross_genus_mask = original_keys.isin(
+        genus_keys
+    )
+
+    species_rows = protein_metadata_df.loc[original_cross_species_mask].copy()
+    genus_rows = protein_metadata_df.loc[original_cross_genus_mask].copy()
+
+
+    def check_annotations(rows: pd.DataFrame, label: str) -> None:
+        cleaned_annotations = (
+            rows["Annotation"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        print(f"\nAnnotation check for {label}:")
+        print(f"Total rows: {len(rows):,}")
+        print(f"Annotation is NA: {rows['Annotation'].isna().sum():,}")
+        print(f"Annotation is blank: {cleaned_annotations.eq('').sum():,}")
+        print(f"Annotation is available: {cleaned_annotations.ne('').sum():,}")
+
+        print(
+            rows[
+                [
+                    "Protein_ID",
+                    "Proteome_ID",
+                    "Genus_species",
+                    "Annotation",
+                ]
+            ]
+            .head(10)
+            .to_string(index=False)
+        )
+
+
+    check_annotations(species_rows, "cross-species proteins")
+    check_annotations(genus_rows, "cross-genus proteins")
+
+    duplicate_annotations_species = (
+        protein_metadata_df.loc[
+            original_cross_species_mask,
+            ["Annotation"],
+        ]
+        .dropna(subset=["Annotation"])
+        .assign(
+            Annotation=lambda df: df["Annotation"].str.strip()
+        )
+        .query("Annotation != ''")
+        .drop_duplicates()
+        .sort_values("Annotation")
+        .reset_index(drop=True)
+    )
+
+    duplicate_annotations_genera = (
+        protein_metadata_df.loc[
+            original_cross_genus_mask,
+            ["Annotation"],
+        ]
+        .dropna(subset=["Annotation"])
+        .assign(
+            Annotation=lambda df: df["Annotation"].str.strip()
+        )
+        .query("Annotation != ''")
+        .drop_duplicates()
+        .sort_values("Annotation")
+        .reset_index(drop=True)
+    )
+
+    save_csv(
+        duplicate_annotations_species,
+        DATA_DIR
+        / "intermediate/duplicate_annotations_across_species.csv",
+    )
+
+    save_csv(
+        duplicate_annotations_genera,
+        DATA_DIR
+        / "intermediate/duplicate_annotations_across_genera.csv",
+    )
+
+    print(
+        f"Original rows belonging to cross-species proteins: "
+        f"{original_cross_species_mask.sum():,}"
+    )
+    print(
+        f"Unique annotations occurring across species: "
+        f"{len(duplicate_annotations_species):,}"
+    )
+    print(
+        f"Original rows belonging to cross-genus proteins: "
+        f"{original_cross_genus_mask.sum():,}"
+    )
+    print(
+        f"Unique annotations occurring across genera: "
+        f"{len(duplicate_annotations_genera):,}"
+    )
+
+    return result
+
 
 def main() -> None:
     fasta_records, pathogenic_df = load_input_data()
@@ -230,16 +441,13 @@ def main() -> None:
         protein_metadata_df=protein_metadata_df
     )
 
-    print_diagnostics(protein_metadata_df)
-    print_duplicate_diagnostics(protein_metadata_df)
+    protein_metadata_df = remove_duplicate_proteins(
+        protein_metadata_df=protein_metadata_df
+    )
 
     output_path = DATA_DIR / "intermediate/protein_metadata.csv"
 
-    print("Saving metadata to CSV...")
     save_csv(protein_metadata_df, output_path)
-
-    print(f"Saved: {output_path}")
-    print("Done")
 
 
 if __name__ == "__main__":

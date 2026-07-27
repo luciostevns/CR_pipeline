@@ -78,7 +78,8 @@ def compute_alignment_metrics(seq1, seq2, aligner, metric_cols):
     if pd.isna(seq1) or pd.isna(seq2):
         return empty_alignment_metrics(metric_cols)
 
-    seq1, seq2 = str(seq1).strip(), str(seq2).strip()
+    seq1 = str(seq1).strip()
+    seq2 = str(seq2).strip()
 
     if not seq1 or not seq2:
         return empty_alignment_metrics(metric_cols)
@@ -88,58 +89,28 @@ def compute_alignment_metrics(seq1, seq2, aligner, metric_cols):
     except Exception:
         return empty_alignment_metrics(metric_cols)
 
-    matches = 0
-    mismatches = 0
-    gap_count = 0
-    alignment_length = 0
+    # Let Biopython count the alignment components
+    counts = best.counts()
 
-    query_positions = set()
-    subject_positions = set()
+    matches = counts.identities
+    mismatches = counts.mismatches
+    gap_count = counts.gaps
+    alignment_length = best.length
 
-    coords = best.coordinates
+    if alignment_length == (matches + mismatches + gap_count):
+        pass  # Valid alignment
+    else:
+        print("Warning: alignment length mismatch.")
+        print(f"Seq1: {seq1}")
+        print(f"Seq2: {seq2}")
+        print(f"Alignment:\n{best}")
+        print(f"Counts: {counts}")
+        return empty_alignment_metrics(metric_cols)
 
-    for i in range(coords.shape[1] - 1):
-        start1, end1 = coords[0, i], coords[0, i + 1]
-        start2, end2 = coords[1, i], coords[1, i + 1]
-
-        len1 = end1 - start1
-        len2 = end2 - start2
-
-        if len1 > 0 and len2 > 0:
-            segment1 = seq1[start1:end1]
-            segment2 = seq2[start2:end2]
-
-            query_positions.update(range(start1, end1))
-            subject_positions.update(range(start2, end2))
-
-            alignment_length += len(segment1)
-
-            for a, b in zip(segment1, segment2):
-                if a == b:
-                    matches += 1
-                else:
-                    mismatches += 1
-
-        else:
-            gap_len = max(len1, len2)
-            gap_count += gap_len
-            alignment_length += gap_len
-
+    # Gap-inclusive percentage identity
     percent_identity = (
-        (matches / alignment_length) * 100
-        if alignment_length
-        else 0.0
-    )
-
-    query_coverage = (
-        (len(query_positions) / len(seq1)) * 100
-        if len(seq1)
-        else 0.0
-    )
-
-    subject_coverage = (
-        (len(subject_positions) / len(seq2)) * 100
-        if len(seq2)
+        matches / (alignment_length) * 100
+        if alignment_length > 0
         else 0.0
     )
 
@@ -159,9 +130,7 @@ def compute_alignment_metrics(seq1, seq2, aligner, metric_cols):
         "Mismatches": mismatches,
         "Gap_Count": gap_count,
         "Alignment_Score": raw_score,
-        "Normalized_Alignment_Score": normalized_score,
-        "Query_Coverage": query_coverage,
-        "Subject_Coverage": subject_coverage,
+        "Normalized_Alignment_Score": normalized_score
     })
 
 
@@ -334,9 +303,7 @@ metric_cols = [
     "Mismatches",
     "Gap_Count",
     "Alignment_Score",
-    "Normalized_Alignment_Score",
-    "Query_Coverage",
-    "Subject_Coverage",
+    "Normalized_Alignment_Score"
 ]
 
 
@@ -375,8 +342,6 @@ summary_df = (
         SD_Alignment_Score=("Alignment_Score", "std"),
         Mean_Normalized_Alignment_Score=("Normalized_Alignment_Score", "mean"),
         SD_Normalized_Alignment_Score=("Normalized_Alignment_Score", "std"),
-        Mean_Query_Coverage=("Query_Coverage", "mean"),
-        Mean_Subject_Coverage=("Subject_Coverage", "mean"),
         Mean_Alignment_Length=("Alignment_Length", "mean"),
         Mean_Gap_Count=("Gap_Count", "mean"),
         N_pathogen_proteins=("Pathogen_Protein_ID", "nunique"),
@@ -398,13 +363,11 @@ print(f"Saved alignment summary to: {summary_output_path}")
 
 plt.figure(figsize=(9, 7))
 
-size_scale = 3
-
 sc = plt.scatter(
     summary_df["Mean_Identity"],
     summary_df["Mean_Normalized_Alignment_Score"],
     c=summary_df["N_pathogen_proteins"],
-    s=summary_df["Mean_Query_Coverage"] * size_scale,
+    s=60,
     norm=LogNorm(),
     alpha=0.75,
 )
@@ -447,7 +410,7 @@ label_df = summary_df[summary_df["IEDB_Protein_ID"].isin(highlight_ids)]
 plt.scatter(
     label_df["Mean_Identity"],
     label_df["Mean_Normalized_Alignment_Score"],
-    s=label_df["Mean_Query_Coverage"] * size_scale * 1.3,
+    s=80,
     facecolors="none",
     edgecolors="black",
     linewidths=1.2,
@@ -493,19 +456,6 @@ plt.ylabel("Mean normalized global alignment score")
 
 cbar = plt.colorbar(sc)
 cbar.set_label("Number of matched pathogen proteins (log scale)")
-
-size_values = [25, 50, 75, 100]
-size_handles = [
-    plt.scatter([], [], s=value * size_scale, alpha=0.75, label=f"{value}%")
-    for value in size_values
-]
-
-plt.legend(
-    handles=size_handles,
-    title="Mean query coverage",
-    loc="best",
-    frameon=True,
-)
 
 plt.tight_layout()
 
