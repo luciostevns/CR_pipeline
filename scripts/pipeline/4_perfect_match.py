@@ -8,13 +8,71 @@ from crossreactivity.config import config
 from crossreactivity.io import DATA_DIR, load_csv, save_csv
 
 
-def load_input_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_input_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     print("Loading data...")
 
-    pathogen_data = load_csv(DATA_DIR / "intermediate/protein_metadata.csv")
+    protein_sequences = load_csv(
+        DATA_DIR / "intermediate/protein_sequences.csv"
+    )
+    protein_occurrences = load_csv(
+        DATA_DIR / "intermediate/protein_occurrences.csv"
+    )
     iedb_data = load_csv(DATA_DIR / "intermediate/wrangled_IEDB.csv")
 
-    return pathogen_data, iedb_data
+    sequence_cols = {"Protein_ID", "Sequence", "Annotation", "Gene_name"}
+    occurrence_cols = {
+        "Protein_ID",
+        "Proteome_ID",
+        "Scientific_name",
+        "Genus_species",
+        "Strain",
+    }
+
+    for name, data, required in [
+        ("protein_sequences.csv", protein_sequences, sequence_cols),
+        ("protein_occurrences.csv", protein_occurrences, occurrence_cols),
+    ]:
+        missing = required.difference(data.columns)
+        if missing:
+            raise ValueError(f"{name} is missing columns: {sorted(missing)}")
+
+    if protein_sequences["Protein_ID"].duplicated().any():
+        raise ValueError(
+            "protein_sequences.csv must contain exactly one row per Protein_ID."
+        )
+
+    if protein_occurrences.duplicated(["Protein_ID", "Proteome_ID"]).any():
+        raise ValueError(
+            "protein_occurrences.csv contains duplicate "
+            "(Protein_ID, Proteome_ID) pairs."
+        )
+
+    for name, data, columns in [
+        ("protein_sequences.csv", protein_sequences, ["Protein_ID", "Sequence"]),
+        (
+            "protein_occurrences.csv",
+            protein_occurrences,
+            ["Protein_ID", "Proteome_ID", "Genus_species"],
+        ),
+    ]:
+        for column in columns:
+            missing = data[column].isna() | data[column].astype(str).str.strip().eq("")
+            if missing.any():
+                raise ValueError(
+                    f"{name} contains {missing.sum():,} missing {column} values."
+                )
+
+    unknown_ids = protein_occurrences.loc[
+        ~protein_occurrences["Protein_ID"].isin(protein_sequences["Protein_ID"]),
+        "Protein_ID",
+    ].unique()
+    if len(unknown_ids):
+        raise ValueError(
+            "Occurrence Protein_IDs missing from protein_sequences.csv. "
+            f"Examples: {unknown_ids[:10].tolist()}"
+        )
+
+    return protein_sequences, protein_occurrences, iedb_data
 
 
 def prepare_epitopes(iedb_data: pd.DataFrame) -> list[tuple]:
@@ -132,14 +190,14 @@ def build_automaton(epitopes: list[tuple]) -> ahocorasick.Automaton:
 
 
 def find_matches(
-    pathogen_data: pd.DataFrame,
+    protein_sequences: pd.DataFrame,
     automaton: ahocorasick.Automaton,
 ) -> pd.DataFrame:
     """
     Find all exact substring matches in pathogen protein sequences.
 
-    Output is long format:
-    one row = one assay/epitope substring match to one pathogen protein.
+    Each unique Protein_ID is searched once. Occurrence metadata is attached
+    only after duplicate, nested-match, and IEDB-region filtering.
     """
 
     matches = []
@@ -147,15 +205,11 @@ def find_matches(
     print("Matching sequences...")
 
     for row in tqdm(
-        pathogen_data.itertuples(index=False),
-        total=len(pathogen_data),
+        protein_sequences.itertuples(index=False),
+        total=len(protein_sequences),
     ):
         seq = row.Sequence
         pid = row.Protein_ID
-        proteome_id = getattr(row, "Proteome_ID", None)
-        pathogen_organism = getattr(row, "Genus_species", None)
-        pathogen_strain = getattr(row, "Strain", None)
-        scientific_name = getattr(row, "Scientific_name", None)
         annot = row.Annotation
         gene = getattr(row, "Gene_name", None)
 
@@ -193,10 +247,6 @@ def find_matches(
                         ep_prot_id,
                         full_epitope,
                         pid,
-                        proteome_id,
-                        pathogen_organism,
-                        scientific_name,
-                        pathogen_strain,
                         annot,
                         gene,
                         sub,
@@ -222,10 +272,6 @@ def find_matches(
             "IEDB_Protein_ID",
             "IEDB_Epitope_Sequence",
             "Pathogen_Protein_ID",
-            "Proteome_ID",
-            "Pathogen_Organism",
-            "Pathogen_Scientific_name",
-            "Pathogen_Strain",
             "Pathogen_Annotation",
             "Pathogen_Gene_Name",
             "Matched_seq",
@@ -268,9 +314,8 @@ def add_iedb_region_ids(match_df: pd.DataFrame) -> pd.DataFrame:
     """
     Add merged IEDB-region labels to the long match table.
 
-    This preserves row-level traceability:
-    each row still links disease, assay, epitope, pathogen organism,
-    pathogen protein, matched sequence, and region ID.
+    Occurrence metadata is added afterward, so the final long table preserves
+    disease, assay, epitope, pathogen, match, and region traceability.
     """
 
     match_df = match_df.copy()
@@ -360,7 +405,6 @@ def remove_nested(match_df: pd.DataFrame) -> pd.DataFrame:
         "Assay_ID",
         "IEDB_Protein_ID",
         "Pathogen_Protein_ID",
-        "Proteome_ID",
     ]
 
     grouped_results = []
@@ -420,6 +464,66 @@ def remove_nested(match_df: pd.DataFrame) -> pd.DataFrame:
     print("Matches after nested filtering:", len(filtered_df))
 
     return filtered_df
+
+
+def expand_pathogen_metadata(
+    match_df: pd.DataFrame,
+    protein_occurrences: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Expand retained protein-level matches to one row per proteome occurrence.
+    """
+    if match_df.empty:
+        return match_df.copy()
+
+    print("Expanding retained matches to organism-level rows...")
+
+    metadata_columns = [
+        "Proteome_ID",
+        "Pathogen_Organism",
+        "Pathogen_Scientific_name",
+        "Pathogen_Strain",
+    ]
+    occurrences = protein_occurrences.rename(
+        columns={
+            "Genus_species": "Pathogen_Organism",
+            "Scientific_name": "Pathogen_Scientific_name",
+            "Strain": "Pathogen_Strain",
+        }
+    )
+    original_columns = match_df.columns.tolist()
+    expanded_df = match_df.merge(
+        occurrences[["Protein_ID", *metadata_columns]],
+        left_on="Pathogen_Protein_ID",
+        right_on="Protein_ID",
+        how="left",
+        validate="many_to_many",
+        indicator=True,
+    )
+
+    unmatched = expanded_df["_merge"].eq("left_only")
+    if unmatched.any():
+        examples = expanded_df.loc[
+            unmatched, "Pathogen_Protein_ID"
+        ].drop_duplicates().head(10).tolist()
+        raise ValueError(
+            "Matched proteins without occurrence metadata. "
+            f"Examples: {examples}"
+        )
+
+    expanded_df = expanded_df.drop(columns=["Protein_ID", "_merge"])
+    insert_at = original_columns.index("Pathogen_Protein_ID") + 1
+    output_columns = (
+        original_columns[:insert_at]
+        + metadata_columns
+        + original_columns[insert_at:]
+    )
+    expanded_df = expanded_df[output_columns]
+
+    print(f"Retained protein-level matches: {len(match_df)}")
+    print(f"Organism-level match rows after expansion: {len(expanded_df)}")
+
+    return expanded_df
 
 
 def summarize_regions(match_df_with_regions: pd.DataFrame) -> pd.DataFrame:
@@ -486,7 +590,7 @@ def summarize_regions(match_df_with_regions: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> None:
-    pathogen_data, iedb_data = load_input_data()
+    protein_sequences, protein_occurrences, iedb_data = load_input_data()
 
     epitopes = prepare_epitopes(iedb_data)
 
@@ -494,7 +598,7 @@ def main() -> None:
     automaton = build_automaton(epitopes)
 
     match_df = find_matches(
-        pathogen_data=pathogen_data,
+        protein_sequences=protein_sequences,
         automaton=automaton,
     )
 
@@ -505,6 +609,11 @@ def main() -> None:
     match_df = remove_nested(match_df)
 
     match_df_with_regions = add_iedb_region_ids(match_df)
+
+    match_df_with_regions = expand_pathogen_metadata(
+        match_df_with_regions,
+        protein_occurrences,
+    )
 
     long_output_path = DATA_DIR / "proccesed/iedb_match_regions_long.csv"
     save_csv(match_df_with_regions, long_output_path)

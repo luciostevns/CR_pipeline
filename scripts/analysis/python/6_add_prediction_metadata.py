@@ -1,6 +1,7 @@
 import pandas as pd
 
 from crossreactivity.io import DATA_DIR, load_csv, save_csv
+from crossreactivity.reference_data import GRAM_STATUS
 
 
 NETSURFP_COLS = [
@@ -66,7 +67,14 @@ def load_prediction_inputs():
     match_df = load_csv(DATA_DIR / "proccesed/iedb_match_regions_long.csv")
 
     print("Loading pathogen protein metadata...")
-    protein_meta = load_csv(DATA_DIR / "intermediate/protein_metadata.csv")
+    protein_sequences = load_csv(
+        DATA_DIR / "intermediate/protein_sequences.csv"
+    )
+
+    print("Loading pathogen DeepLoc prediction manifest...")
+    deeploc_manifest = load_csv(
+        DATA_DIR / "intermediate/pathogen_deeploc_prediction_manifest.csv"
+    )
 
     print("Loading IEDB metadata...")
     iedb_data = load_csv(DATA_DIR / "intermediate/wrangled_IEDB.csv")
@@ -109,7 +117,8 @@ def load_prediction_inputs():
 
     return (
         match_df,
-        protein_meta,
+        protein_sequences,
+        deeploc_manifest,
         iedb_data,
         netsurfp_iedb,
         netsurfp_pathogen,
@@ -120,7 +129,8 @@ def load_prediction_inputs():
 
 def clean_prediction_ids(
     match_df: pd.DataFrame,
-    protein_meta: pd.DataFrame,
+    protein_sequences: pd.DataFrame,
+    deeploc_manifest: pd.DataFrame,
     iedb_data: pd.DataFrame,
     netsurfp_iedb: pd.DataFrame,
     netsurfp_pathogen: pd.DataFrame,
@@ -128,7 +138,8 @@ def clean_prediction_ids(
     deeploc_pathogen: pd.DataFrame,
 ):
     match_df = match_df.copy()
-    protein_meta = protein_meta.copy()
+    protein_sequences = protein_sequences.copy()
+    deeploc_manifest = deeploc_manifest.copy()
     iedb_data = iedb_data.copy()
     netsurfp_iedb = netsurfp_iedb.copy()
     netsurfp_pathogen = netsurfp_pathogen.copy()
@@ -137,7 +148,8 @@ def clean_prediction_ids(
 
     for df in [
         match_df,
-        protein_meta,
+        protein_sequences,
+        deeploc_manifest,
         iedb_data,
         netsurfp_iedb,
         netsurfp_pathogen,
@@ -164,25 +176,77 @@ def clean_prediction_ids(
         .str.upper()
     )
 
-    if "Proteome_ID" in match_df.columns:
-        match_df["Proteome_ID"] = (
-            match_df["Proteome_ID"]
-            .astype("string")
-            .str.strip()
-        )
-
-    protein_meta["Protein_ID_clean"] = (
-        protein_meta["Protein_ID"]
+    protein_sequences["Protein_ID_clean"] = (
+        protein_sequences["Protein_ID"]
         .astype("string")
         .str.strip()
         .str.upper()
     )
 
-    if "Proteome_ID" in protein_meta.columns:
-        protein_meta["Proteome_ID"] = (
-            protein_meta["Proteome_ID"]
-            .astype("string")
-            .str.strip()
+    if protein_sequences["Protein_ID_clean"].isna().any():
+        raise ValueError("protein_sequences.csv contains missing Protein_IDs.")
+
+    if protein_sequences["Protein_ID_clean"].duplicated().any():
+        raise ValueError(
+            "protein_sequences.csv must contain one row per Protein_ID."
+        )
+
+    required_manifest_cols = {"Prediction_ID", "Protein_ID", "Gram_status"}
+    missing_manifest_cols = required_manifest_cols - set(deeploc_manifest.columns)
+    if missing_manifest_cols:
+        raise ValueError(
+            "DeepLoc manifest is missing columns: "
+            + ", ".join(sorted(missing_manifest_cols))
+        )
+
+    deeploc_manifest["Prediction_ID_clean"] = (
+        deeploc_manifest["Prediction_ID"]
+        .astype("string")
+        .str.strip()
+        .str.upper()
+    )
+    deeploc_manifest["Protein_ID_clean"] = (
+        deeploc_manifest["Protein_ID"]
+        .astype("string")
+        .str.strip()
+        .str.upper()
+    )
+    deeploc_manifest["Gram_status"] = (
+        deeploc_manifest["Gram_status"]
+        .astype("string")
+        .str.strip()
+        .str.lower()
+    )
+
+    manifest_keys = ["Protein_ID_clean", "Gram_status"]
+    if deeploc_manifest[manifest_keys].isna().any(axis=None):
+        raise ValueError("DeepLoc manifest contains missing protein or Gram keys.")
+    if deeploc_manifest.duplicated(manifest_keys).any():
+        raise ValueError(
+            "DeepLoc manifest has duplicate Protein_ID + Gram_status rows."
+        )
+    if deeploc_manifest["Prediction_ID_clean"].duplicated().any():
+        raise ValueError("DeepLoc manifest contains duplicate Prediction_IDs.")
+
+    if "Pathogen_Organism" not in match_df.columns:
+        raise ValueError("Match table is missing Pathogen_Organism.")
+
+    match_df["Gram_status"] = (
+        match_df["Pathogen_Organism"]
+        .astype("string")
+        .str.strip()
+        .map(GRAM_STATUS)
+    )
+
+    unknown_organisms = (
+        match_df.loc[match_df["Gram_status"].isna(), "Pathogen_Organism"]
+        .drop_duplicates()
+        .sort_values()
+    )
+    if not unknown_organisms.empty:
+        raise ValueError(
+            "Missing Gram-status mapping for: "
+            + ", ".join(unknown_organisms.astype(str))
         )
 
     iedb_data["Protein_ID_clean"] = (
@@ -225,16 +289,17 @@ def clean_prediction_ids(
         .str.upper()
     )
 
-    deeploc_pathogen["Protein_ID_clean"] = (
+    deeploc_pathogen["Prediction_ID_clean"] = (
         deeploc_pathogen["ACC"]
-        .astype(str)
+        .astype("string")
         .str.strip()
         .str.upper()
     )
 
     return (
         match_df,
-        protein_meta,
+        protein_sequences,
+        deeploc_manifest,
         iedb_data,
         netsurfp_iedb,
         netsurfp_pathogen,
@@ -245,23 +310,22 @@ def clean_prediction_ids(
 
 def add_input_metadata(
     match_df: pd.DataFrame,
-    protein_meta: pd.DataFrame,
+    protein_sequences: pd.DataFrame,
     iedb_data: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Add metadata that is not already present in the match table.
     """
     match_df = match_df.copy()
-    protein_meta = protein_meta.copy()
+    protein_sequences = protein_sequences.copy()
     iedb_data = iedb_data.copy()
 
     # ------------------------------------------------------------
     # Pathogen protein length
     # ------------------------------------------------------------
-    pathogen_meta = protein_meta[
+    pathogen_meta = protein_sequences[
         [
             "Protein_ID_clean",
-            "Proteome_ID",
             "Sequence",
         ]
     ].copy()
@@ -275,9 +339,6 @@ def add_input_metadata(
     pathogen_meta = (
         pathogen_meta
         .drop(columns="Sequence")
-        .drop_duplicates(
-            subset=["Protein_ID_clean", "Proteome_ID"]
-        )
     )
 
     before_rows = len(match_df)
@@ -287,8 +348,8 @@ def add_input_metadata(
         .merge(
             pathogen_meta,
             how="left",
-            left_on=["Pathogen_Protein_ID_clean", "Proteome_ID"],
-            right_on=["Protein_ID_clean", "Proteome_ID"],
+            left_on="Pathogen_Protein_ID_clean",
+            right_on="Protein_ID_clean",
             validate="many_to_one",
         )
         .drop(columns="Protein_ID_clean")
@@ -297,6 +358,20 @@ def add_input_metadata(
     if len(match_df) != before_rows:
         raise RuntimeError(
             "Pathogen metadata merge changed the number of match rows."
+        )
+
+    if match_df["Pathogen_Protein_Length"].isna().any():
+        missing = (
+            match_df.loc[
+                match_df["Pathogen_Protein_Length"].isna(),
+                "Pathogen_Protein_ID_clean",
+            ]
+            .dropna()
+            .unique()[:10]
+        )
+        raise ValueError(
+            "Matched pathogen proteins missing from protein_sequences.csv: "
+            + ", ".join(missing)
         )
 
     # ------------------------------------------------------------
@@ -348,6 +423,12 @@ def check_prediction_coverage(
         .tolist()
     )
 
+    expected_pathogen_prediction_ids = set(
+        match_df["Prediction_ID_clean"]
+        .dropna()
+        .tolist()
+    )
+
     missing_netsurfp_iedb = (
         matched_iedb_ids -
         set(netsurfp_iedb["Protein_ID_clean"].dropna())
@@ -364,12 +445,16 @@ def check_prediction_coverage(
     )
 
     missing_deeploc_pathogen = (
-        matched_pathogen_ids -
-        set(deeploc_pathogen["Protein_ID_clean"].dropna())
+        expected_pathogen_prediction_ids -
+        set(deeploc_pathogen["Prediction_ID_clean"].dropna())
     )
 
     print("Expected matched IEDB proteins:", len(matched_iedb_ids))
     print("Expected matched pathogen proteins:", len(matched_pathogen_ids))
+    print(
+        "Expected Gram-specific pathogen DeepLoc predictions:",
+        len(expected_pathogen_prediction_ids),
+    )
 
     print("\nMissing from NetSurfP IEDB:", len(missing_netsurfp_iedb))
     print("Missing from NetSurfP pathogen:", len(missing_netsurfp_pathogen))
@@ -398,12 +483,84 @@ def check_prediction_coverage(
         DATA_DIR / "proccesed/missing_deeploc_iedb_ids.csv"
     )
 
+    missing_deeploc_pathogen_df = (
+        match_df.loc[
+            match_df["Prediction_ID_clean"].isin(missing_deeploc_pathogen),
+            [
+                "Prediction_ID_clean",
+                "Pathogen_Protein_ID_clean",
+                "Gram_status",
+            ],
+        ]
+        .drop_duplicates()
+        .rename(columns={
+            "Prediction_ID_clean": "Prediction_ID",
+            "Pathogen_Protein_ID_clean": "Protein_ID",
+        })
+        .sort_values("Prediction_ID")
+    )
     save_csv(
-        pd.DataFrame({
-            "Pathogen_Protein_ID": sorted(missing_deeploc_pathogen)
-        }),
+        missing_deeploc_pathogen_df,
         DATA_DIR / "proccesed/missing_deeploc_pathogen_ids.csv"
     )
+
+
+def add_pathogen_prediction_ids(
+    match_df: pd.DataFrame,
+    deeploc_manifest: pd.DataFrame,
+) -> pd.DataFrame:
+    before_rows = len(match_df)
+    manifest = deeploc_manifest[
+        ["Protein_ID_clean", "Gram_status", "Prediction_ID_clean"]
+    ]
+
+    match_df = match_df.merge(
+        manifest,
+        how="left",
+        left_on=["Pathogen_Protein_ID_clean", "Gram_status"],
+        right_on=["Protein_ID_clean", "Gram_status"],
+        validate="many_to_one",
+    ).drop(columns="Protein_ID_clean")
+
+    if len(match_df) != before_rows:
+        raise RuntimeError("DeepLoc manifest merge changed match row count.")
+
+    missing = match_df["Prediction_ID_clean"].isna()
+    if missing.any():
+        examples = (
+            match_df.loc[
+                missing,
+                ["Pathogen_Protein_ID_clean", "Gram_status"],
+            ]
+            .drop_duplicates()
+            .head(10)
+            .apply(lambda row: f"{row.iloc[0]} ({row.iloc[1]})", axis=1)
+        )
+        raise ValueError(
+            "Matched protein/Gram pairs missing from the DeepLoc manifest: "
+            + ", ".join(examples)
+        )
+
+    return match_df
+
+
+def unique_prediction_metadata(
+    df: pd.DataFrame,
+    key: str,
+    value: str,
+    description: str,
+) -> pd.DataFrame:
+    metadata = df[[key, value]].dropna(subset=[key]).drop_duplicates()
+    conflicts = metadata.groupby(key, dropna=False)[value].nunique(dropna=False)
+    conflicts = conflicts[conflicts > 1]
+
+    if not conflicts.empty:
+        examples = ", ".join(conflicts.index.astype(str)[:10])
+        raise ValueError(
+            f"Conflicting {description} predictions for: {examples}"
+        )
+
+    return metadata.drop_duplicates(key)
 
 
 def add_deeploc_metadata(
@@ -411,36 +568,45 @@ def add_deeploc_metadata(
     deeploc_iedb: pd.DataFrame,
     deeploc_pathogen: pd.DataFrame,
 ) -> pd.DataFrame:
-    iedb_location_meta = (
-        deeploc_iedb[["Protein_ID_clean", "Localizations"]]
-        .dropna(subset=["Protein_ID_clean"])
-        .drop_duplicates("Protein_ID_clean")
-        .rename(columns={"Localizations": "IEDB_prot_location"})
+    iedb_location_meta = unique_prediction_metadata(
+        deeploc_iedb,
+        key="Protein_ID_clean",
+        value="Localizations",
+        description="IEDB DeepLoc",
+    ).rename(
+        columns={"Localizations": "IEDB_prot_location"}
     )
 
-    pathogen_location_meta = (
-        deeploc_pathogen[["Protein_ID_clean", "Localization"]]
-        .dropna(subset=["Protein_ID_clean"])
-        .drop_duplicates("Protein_ID_clean")
-        .rename(columns={"Localization": "pathogen_prot_location"})
+    pathogen_location_meta = unique_prediction_metadata(
+        deeploc_pathogen,
+        key="Prediction_ID_clean",
+        value="Localization",
+        description="pathogen DeepLoc",
+    ).rename(
+        columns={"Localization": "pathogen_prot_location"}
+    )
+
+    before_rows = len(match_df)
+    match_df_meta = match_df.merge(
+        pathogen_location_meta,
+        how="left",
+        on="Prediction_ID_clean",
+        validate="many_to_one",
     )
 
     match_df_meta = (
-        match_df
-        .merge(
-            pathogen_location_meta,
-            how="left",
-            left_on="Pathogen_Protein_ID_clean",
-            right_on="Protein_ID_clean"
-        )
-        .drop(columns=["Protein_ID_clean"])
-        .merge(
+        match_df_meta.merge(
             iedb_location_meta,
             how="left",
             left_on="IEDB_Protein_ID_clean",
-            right_on="Protein_ID_clean")
-        .drop(columns=["Protein_ID_clean"])
+            right_on="Protein_ID_clean",
+            validate="many_to_one",
+        )
+        .drop(columns=["Protein_ID_clean", "Gram_status", "Prediction_ID_clean"])
     )
+
+    if len(match_df_meta) != before_rows:
+        raise RuntimeError("DeepLoc merges changed the number of match rows.")
 
     return match_df_meta
 
@@ -472,9 +638,9 @@ def prepare_numeric_columns(
                 errors="coerce"
             )
 
-    if "Pathogen_Metadata_Protein_Length" in match_df_meta.columns:
-        match_df_meta["Pathogen_Metadata_Protein_Length"] = pd.to_numeric(
-            match_df_meta["Pathogen_Metadata_Protein_Length"],
+    if "Pathogen_Protein_Length" in match_df_meta.columns:
+        match_df_meta["Pathogen_Protein_Length"] = pd.to_numeric(
+            match_df_meta["Pathogen_Protein_Length"],
             errors="coerce"
         )
 
@@ -625,22 +791,22 @@ def print_final_diagnostics(match_df_meta: pd.DataFrame) -> None:
 
     print("\nInput metadata merge coverage:")
 
-    if "Pathogen_Metadata_Genus_species" in match_df_meta.columns:
+    if "Pathogen_Organism" in match_df_meta.columns:
         print(
-            "Pathogen genus/species missing:",
-            match_df_meta["Pathogen_Metadata_Genus_species"].isna().sum()
+            "Pathogen organism missing:",
+            match_df_meta["Pathogen_Organism"].isna().sum()
         )
 
-    if "Pathogen_Metadata_Protein_Length" in match_df_meta.columns:
+    if "Pathogen_Protein_Length" in match_df_meta.columns:
         print(
             "Pathogen protein length missing:",
-            match_df_meta["Pathogen_Metadata_Protein_Length"].isna().sum()
+            match_df_meta["Pathogen_Protein_Length"].isna().sum()
         )
 
-    if "IEDB_Metadata_MHC_restriction" in match_df_meta.columns:
+    if "MHC_restriction" in match_df_meta.columns:
         print(
             "IEDB MHC restriction missing:",
-            match_df_meta["IEDB_Metadata_MHC_restriction"].isna().sum()
+            match_df_meta["MHC_restriction"].isna().sum()
         )
 
     print("\nDeepLoc merge coverage:")
@@ -671,7 +837,8 @@ def print_final_diagnostics(match_df_meta: pd.DataFrame) -> None:
 def main() -> None:
     (
         match_df,
-        protein_meta,
+        protein_sequences,
+        deeploc_manifest,
         iedb_data,
         netsurfp_iedb,
         netsurfp_pathogen,
@@ -681,7 +848,8 @@ def main() -> None:
 
     (
         match_df,
-        protein_meta,
+        protein_sequences,
+        deeploc_manifest,
         iedb_data,
         netsurfp_iedb,
         netsurfp_pathogen,
@@ -689,7 +857,8 @@ def main() -> None:
         deeploc_pathogen,
     ) = clean_prediction_ids(
         match_df,
-        protein_meta,
+        protein_sequences,
+        deeploc_manifest,
         iedb_data,
         netsurfp_iedb,
         netsurfp_pathogen,
@@ -699,8 +868,13 @@ def main() -> None:
 
     match_df = add_input_metadata(
         match_df=match_df,
-        protein_meta=protein_meta,
+        protein_sequences=protein_sequences,
         iedb_data=iedb_data,
+    )
+
+    match_df = add_pathogen_prediction_ids(
+        match_df=match_df,
+        deeploc_manifest=deeploc_manifest,
     )
 
     check_prediction_coverage(

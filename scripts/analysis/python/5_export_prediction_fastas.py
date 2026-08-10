@@ -14,98 +14,125 @@ PATHOGEN_FASTA_BATCH_SIZE = 500
 
 def load_input_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     match_file = DATA_DIR / "proccesed/iedb_match_regions_long.csv"
-    protein_meta_file = DATA_DIR / "intermediate/protein_metadata.csv"
+    protein_sequences_file = DATA_DIR / "intermediate/protein_sequences.csv"
 
     print("Loading data files...")
     match_df = load_csv(match_file)
-    protein_meta = load_csv(protein_meta_file)
+    protein_sequences = load_csv(protein_sequences_file)
 
-    return match_df, protein_meta
+    return match_df, protein_sequences
 
 
-def get_matched_pathogen_subset(
+def prepare_pathogen_exports(
     match_df: pd.DataFrame,
-    protein_meta: pd.DataFrame
-) -> pd.DataFrame:
-    matched_pathogen_ids = (
-        match_df["Pathogen_Protein_ID"]
-        .map(clean_id)
-        .dropna()
-        .unique()
-        .tolist()
-    )
+    protein_sequences: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    match_cols = {"Pathogen_Protein_ID", "Pathogen_Organism"}
+    sequence_cols = {"Protein_ID", "Sequence", "Annotation"}
 
-    print(f"Unique matched pathogen Protein_IDs: {len(matched_pathogen_ids)}")
+    for name, df, required in [
+        ("iedb_match_regions_long.csv", match_df, match_cols),
+        ("protein_sequences.csv", protein_sequences, sequence_cols),
+    ]:
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"{name} is missing columns: {sorted(missing)}")
 
-    protein_meta = protein_meta.copy()
-    protein_meta["Protein_ID_clean"] = protein_meta["Protein_ID"].map(clean_id)
+    match_df = match_df.copy()
+    protein_sequences = protein_sequences.copy()
+    match_df["Protein_ID"] = match_df["Pathogen_Protein_ID"].map(clean_id)
+    protein_sequences["Protein_ID"] = protein_sequences["Protein_ID"].map(clean_id)
 
-    pathogen_subset = protein_meta[
-        protein_meta["Protein_ID_clean"].isin(matched_pathogen_ids)
-    ].copy()
-
-    print(
-        "Matched protein-proteome entries found in protein_metadata.csv: "
-        f"{len(pathogen_subset)}"
-    )
-
-    sequence_check = (
-        pathogen_subset
-        .dropna(subset=["Protein_ID_clean", "Sequence"])
-        .groupby("Protein_ID_clean")["Sequence"]
-        .nunique()
-    )
-
-    conflicting_sequences = sequence_check[sequence_check > 1]
-
-    print(
-        "Protein IDs with more than one unique sequence: "
-        f"{len(conflicting_sequences)}"
-    )
-
-    if len(conflicting_sequences) > 0:
-        print("Examples of conflicting protein IDs:")
-        print(conflicting_sequences.head(20))
-
-    pathogen_subset = (
-        pathogen_subset
-        .sort_values(["Protein_ID_clean", "Proteome_ID"])
-        .drop_duplicates(subset=["Protein_ID_clean"], keep="first")
-        .copy()
-    )
-
-    print(
-        "Unique matched pathogen proteins retained for FASTA export: "
-        f"{len(pathogen_subset)}"
-    )
-
-    return pathogen_subset
-
-
-def add_gram_status(pathogen_subset: pd.DataFrame) -> pd.DataFrame:
-    pathogen_subset = pathogen_subset.copy()
-    pathogen_subset["Gram_status"] = pathogen_subset["Genus_species"].map(GRAM_STATUS)
-
-    print("\nGram status counts:")
-    print(pathogen_subset["Gram_status"].value_counts(dropna=False))
-
-    unknown_df = pathogen_subset[pathogen_subset["Gram_status"].isna()]
-
-    if len(unknown_df) > 0:
-        print("\nUnmapped species:")
-        print(
-            unknown_df["Genus_species"]
-            .drop_duplicates()
-            .sort_values()
-            .to_string(index=False)
+    if match_df["Protein_ID"].isna().any():
+        raise ValueError("Matched pathogen rows contain missing Protein_IDs.")
+    if protein_sequences["Protein_ID"].isna().any():
+        raise ValueError("protein_sequences.csv contains missing Protein_IDs.")
+    if protein_sequences["Protein_ID"].duplicated().any():
+        examples = protein_sequences.loc[
+            protein_sequences["Protein_ID"].duplicated(keep=False), "Protein_ID"
+        ].unique()[:10]
+        raise ValueError(
+            "protein_sequences.csv must contain one row per Protein_ID. "
+            f"Duplicate examples: {', '.join(examples)}"
         )
 
-    return pathogen_subset
+    matched_ids = match_df[["Protein_ID"]].drop_duplicates()
+    netsurfp = matched_ids.merge(
+        protein_sequences[["Protein_ID", "Sequence", "Annotation"]],
+        on="Protein_ID",
+        how="left",
+        validate="one_to_one",
+        indicator=True,
+    )
+    missing_sequences = netsurfp.loc[netsurfp["_merge"].eq("left_only"), "Protein_ID"]
+    if not missing_sequences.empty:
+        raise ValueError(
+            "Matched proteins missing from protein_sequences.csv: "
+            + ", ".join(missing_sequences.head(10))
+        )
+    netsurfp = netsurfp.drop(columns="_merge")
+    blank_sequences = (
+        netsurfp["Sequence"].isna()
+        | netsurfp["Sequence"].astype(str).str.strip().eq("")
+    )
+    if blank_sequences.any():
+        raise ValueError(
+            "Matched proteins with missing sequences: "
+            + ", ".join(netsurfp.loc[blank_sequences, "Protein_ID"].head(10))
+        )
+
+    gram_membership = match_df[["Protein_ID", "Pathogen_Organism"]].drop_duplicates()
+    gram_membership["Pathogen_Organism"] = (
+        gram_membership["Pathogen_Organism"]
+        .astype("string")
+        .str.strip()
+        .replace("", pd.NA)
+    )
+    gram_membership["Gram_status"] = gram_membership["Pathogen_Organism"].map(
+        GRAM_STATUS
+    )
+    unmapped = gram_membership[gram_membership["Gram_status"].isna()]
+    if not unmapped.empty:
+        species = unmapped["Pathogen_Organism"].dropna().drop_duplicates().sort_values()
+        missing_organisms = unmapped["Pathogen_Organism"].isna().sum()
+        details = species.to_list()
+        if missing_organisms:
+            details.append(f"<missing organism in {missing_organisms} row(s)>")
+        raise ValueError("Missing GRAM_STATUS mapping for: " + ", ".join(details))
+
+    gram_membership = gram_membership[["Protein_ID", "Gram_status"]].drop_duplicates()
+    invalid_gram = set(gram_membership["Gram_status"]) - {"positive", "negative"}
+    if invalid_gram:
+        raise ValueError(f"Unexpected Gram status values: {sorted(invalid_gram)}")
+
+    deeploc = gram_membership.merge(
+        netsurfp,
+        on="Protein_ID",
+        how="left",
+        validate="many_to_one",
+    )
+    suffix = deeploc["Gram_status"].map({"positive": "GP", "negative": "GN"})
+    deeploc["Prediction_ID"] = deeploc["Protein_ID"] + "_" + suffix
+    manifest = deeploc[["Prediction_ID", "Protein_ID", "Gram_status"]].copy()
+
+    cross_gram = (
+        gram_membership.groupby("Protein_ID")["Gram_status"]
+        .nunique()
+        .gt(1)
+        .sum()
+    )
+    print(f"Unique matched pathogen proteins for NetSurfP: {len(netsurfp):,}")
+    print("DeepLoc protein/Gram-status inputs:")
+    print(gram_membership["Gram_status"].value_counts().to_string())
+    print(f"Proteins represented in both Gram classes: {cross_gram:,}")
+
+    return netsurfp, deeploc, manifest
 
 
 def export_fasta_batches(
     df: pd.DataFrame,
     prefix: str,
+    id_column: str,
     batch_size: int = PATHOGEN_FASTA_BATCH_SIZE
 ) -> None:
     n_total = len(df)
@@ -125,16 +152,7 @@ def export_fasta_batches(
 
         with open(batch_file, "w", encoding="utf-8") as out:
             for row in batch_df.itertuples(index=False):
-                protein_id = clean_id(row.Protein_ID)
-                proteome_id = clean_id(getattr(row, "Proteome_ID", None)) or "NA"
-
-                organism = getattr(row, "Genus_species", None)
-                organism = (
-                    str(organism).strip()
-                    if pd.notna(organism) and organism
-                    else "NA"
-                )
-
+                prediction_id = str(getattr(row, id_column)).strip()
                 annotation = getattr(row, "Annotation", None)
                 annotation = (
                     str(annotation).strip()
@@ -142,30 +160,9 @@ def export_fasta_batches(
                     else "NA"
                 )
 
-                gram = getattr(row, "Gram_status", None)
-                gram = (
-                    str(gram).strip()
-                    if pd.notna(gram) and gram
-                    else "NA"
-                )
-
                 sequence = getattr(row, "Sequence", None)
-
-                if pd.isna(sequence) or not protein_id:
-                    continue
-
                 sequence = str(sequence).strip()
-
-                if not sequence:
-                    continue
-
-                header = (
-                    f"{protein_id} "
-                    f"organism={organism} "
-                    f"proteome={proteome_id} "
-                    f"gram={gram} "
-                    f"annotation={annotation}"
-                )
+                header = f"{prediction_id} annotation={annotation}"
 
                 write_fasta_record(out, header, sequence)
 
@@ -175,20 +172,26 @@ def export_fasta_batches(
         )
 
 
-def export_pathogen_fastas(pathogen_subset: pd.DataFrame) -> None:
-    gram_pos_df = pathogen_subset[pathogen_subset["Gram_status"] == "positive"]
-    gram_neg_df = pathogen_subset[pathogen_subset["Gram_status"] == "negative"]
-
+def export_pathogen_fastas(
+    netsurfp: pd.DataFrame,
+    deeploc: pd.DataFrame,
+) -> None:
     export_fasta_batches(
-        gram_pos_df,
-        prefix="matched_pathogen_proteins_gram_positive",
-        batch_size=PATHOGEN_FASTA_BATCH_SIZE
+        netsurfp,
+        prefix="matched_pathogen_proteins_netsurfp",
+        id_column="Protein_ID",
     )
 
     export_fasta_batches(
-        gram_neg_df,
-        prefix="matched_pathogen_proteins_gram_negative",
-        batch_size=PATHOGEN_FASTA_BATCH_SIZE
+        deeploc[deeploc["Gram_status"].eq("positive")],
+        prefix="matched_pathogen_proteins_deeploc_gram_positive",
+        id_column="Prediction_ID",
+    )
+
+    export_fasta_batches(
+        deeploc[deeploc["Gram_status"].eq("negative")],
+        prefix="matched_pathogen_proteins_deeploc_gram_negative",
+        id_column="Prediction_ID",
     )
 
 
@@ -240,16 +243,15 @@ def export_iedb_source_fastas(match_df: pd.DataFrame) -> None:
 
 
 def main() -> None:
-    match_df, protein_meta = load_input_data()
-
-    pathogen_subset = get_matched_pathogen_subset(
+    match_df, protein_sequences = load_input_data()
+    netsurfp, deeploc, manifest = prepare_pathogen_exports(
         match_df=match_df,
-        protein_meta=protein_meta
+        protein_sequences=protein_sequences,
     )
-
-    pathogen_subset = add_gram_status(pathogen_subset)
-
-    export_pathogen_fastas(pathogen_subset)
+    export_pathogen_fastas(netsurfp, deeploc)
+    manifest_out = DATA_DIR / "intermediate/pathogen_deeploc_prediction_manifest.csv"
+    save_csv(manifest, manifest_out)
+    print(f"Saved DeepLoc prediction manifest to: {manifest_out}")
 
     export_iedb_source_fastas(match_df)
 

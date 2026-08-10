@@ -35,39 +35,216 @@ def load_iedb_sequences_from_fasta(fasta_path, uniprot_ids):
 
         protein_id = clean_id(protein_id)
 
-        if protein_id in uniprot_ids:
+        sequence = str(record.seq).strip()
+
+        if protein_id in uniprot_ids and sequence:
             rows.append({
                 "Protein_ID": protein_id,
-                "IEDB_Sequence": str(record.seq)
+                "IEDB_Sequence": sequence,
             })
 
-    return pd.DataFrame(rows)
+    sequence_df = pd.DataFrame(
+        rows,
+        columns=["Protein_ID", "IEDB_Sequence"],
+    )
+
+    if sequence_df.empty:
+        return sequence_df
+
+    sequence_df["IEDB_Sequence"] = (
+        sequence_df["IEDB_Sequence"]
+        .astype("string")
+        .str.strip()
+    )
+
+    sequence_counts = (
+        sequence_df
+        .dropna(subset=["Protein_ID", "IEDB_Sequence"])
+        .groupby("Protein_ID")["IEDB_Sequence"]
+        .nunique()
+    )
+    conflicting_ids = sequence_counts[sequence_counts > 1].index.tolist()
+
+    if conflicting_ids:
+        examples = ", ".join(conflicting_ids[:20])
+        raise ValueError(
+            "Conflicting IEDB sequences were found for the same Protein_ID "
+            f"in {fasta_path}. Example IDs: {examples}"
+        )
+
+    return sequence_df.drop_duplicates(subset=["Protein_ID"], keep="first")
 
 
 def ensure_iedb_fasta_exists(fasta_path, protein_ids):
-    if fasta_path.exists():
-        print(f"Using existing FASTA: {fasta_path}")
-        return
-
-    print("Fetching matched IEDB source protein sequences from UniProt...")
+    protein_ids = set(protein_ids)
     fasta_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_ids = set()
+    if fasta_path.exists():
+        for record in SeqIO.parse(fasta_path, "fasta"):
+            protein_id = (
+                record.id.split("|")[1]
+                if "|" in record.id
+                else record.id.split()[0]
+            )
+            protein_id = clean_id(protein_id)
+            if protein_id and str(record.seq).strip():
+                existing_ids.add(protein_id)
+
+        print(
+            f"Existing IEDB FASTA contains {len(existing_ids)} unique "
+            "protein IDs."
+        )
+
+    missing_ids = sorted(protein_ids - existing_ids)
+
+    if not missing_ids:
+        print(f"IEDB FASTA already covers all required proteins: {fasta_path}")
+        return []
+
+    print(
+        "Fetching "
+        f"{len(missing_ids)} missing IEDB source protein sequence(s) "
+        "from UniProt..."
+    )
 
     failed = []
 
-    with open(fasta_path, "w", encoding="utf-8") as out_f:
-        for protein_id in tqdm(protein_ids, desc="Fetching UniProt FASTA"):
+    mode = "a" if fasta_path.exists() else "w"
+    with open(fasta_path, mode, encoding="utf-8") as out_f:
+        if mode == "a" and fasta_path.stat().st_size > 0:
+            out_f.write("\n")
+
+        for protein_id in tqdm(missing_ids, desc="Fetching UniProt FASTA"):
             fasta_text = fetch_uniprot_fasta(protein_id)
 
-            if fasta_text is None:
+            if not fasta_text:
                 failed.append(protein_id)
                 continue
 
             out_f.write(fasta_text.strip() + "\n")
 
-    print(f"Fetched FASTA sequences for {len(protein_ids) - len(failed)} proteins.")
+    print(f"Fetched FASTA sequences for {len(missing_ids) - len(failed)} proteins.")
 
     if failed:
         print(f"Warning: failed to fetch {len(failed)} proteins from UniProt.")
+
+    return failed
+
+
+def validate_required_columns(df, required_columns, table_name):
+    missing_columns = sorted(set(required_columns) - set(df.columns))
+
+    if missing_columns:
+        raise ValueError(
+            f"{table_name} is missing required columns: "
+            f"{', '.join(missing_columns)}"
+        )
+
+
+def build_epitope_source_map(match_df):
+    source_map = match_df[["IEDB_Protein_ID", "Epitope_Source"]].copy()
+    source_map["Epitope_Source"] = (
+        source_map["Epitope_Source"]
+        .astype("string")
+        .str.strip()
+        .replace("", pd.NA)
+    )
+
+    missing_source_ids = (
+        source_map.loc[
+            source_map["Epitope_Source"].isna(),
+            "IEDB_Protein_ID",
+        ]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+
+    if missing_source_ids:
+        examples = ", ".join(sorted(missing_source_ids)[:20])
+        raise ValueError(
+            "Missing Epitope_Source labels for IEDB protein IDs. "
+            f"Example IDs: {examples}"
+        )
+
+    source_counts = (
+        source_map
+        .dropna(subset=["IEDB_Protein_ID", "Epitope_Source"])
+        .groupby("IEDB_Protein_ID")["Epitope_Source"]
+        .nunique()
+    )
+    conflicting_ids = source_counts[source_counts > 1].index.tolist()
+
+    if conflicting_ids:
+        conflicts = (
+            source_map[source_map["IEDB_Protein_ID"].isin(conflicting_ids)]
+            .drop_duplicates()
+            .sort_values(["IEDB_Protein_ID", "Epitope_Source"])
+        )
+        print("Conflicting Epitope_Source labels:")
+        print(conflicts.head(50).to_string(index=False))
+        raise ValueError(
+            "Each IEDB_Protein_ID must map to exactly one "
+            "Epitope_Source label."
+        )
+
+    return source_map.drop_duplicates(subset=["IEDB_Protein_ID"])
+
+
+def build_pathogen_sequence_table(pathogen_data):
+    pathogen_data = pathogen_data.copy()
+    pathogen_data["Protein_ID"] = pathogen_data["Protein_ID"].map(clean_id)
+
+    missing_id_rows = pathogen_data["Protein_ID"].isna().sum()
+    if missing_id_rows:
+        raise ValueError(
+            f"protein_sequences.csv contains {missing_id_rows} row(s) "
+            "with missing Protein_ID."
+        )
+
+    duplicated_ids = pathogen_data.loc[
+        pathogen_data["Protein_ID"].duplicated(keep=False),
+        "Protein_ID",
+    ].unique()
+
+    if len(duplicated_ids) > 0:
+        examples = ", ".join(sorted(duplicated_ids)[:20])
+        raise ValueError(
+            "protein_sequences.csv must contain exactly one row per "
+            f"Protein_ID. Duplicate IDs include: {examples}"
+        )
+
+    pathogen_data["Sequence"] = (
+        pathogen_data["Sequence"]
+        .astype("string")
+        .str.strip()
+        .replace("", pd.NA)
+    )
+
+    missing_sequence_ids = pathogen_data.loc[
+        pathogen_data["Sequence"].isna(),
+        "Protein_ID",
+    ].tolist()
+
+    if missing_sequence_ids:
+        examples = ", ".join(sorted(missing_sequence_ids)[:20])
+        raise ValueError(
+            "protein_sequences.csv contains proteins without a sequence. "
+            f"Example IDs: {examples}"
+        )
+
+    return (
+        pathogen_data[
+            ["Protein_ID", "Sequence", "Annotation", "Gene_name"]
+        ]
+        .rename(columns={
+            "Protein_ID": "Pathogen_Protein_ID",
+            "Sequence": "Pathogen_Sequence",
+            "Annotation": "Pathogen_Annotation",
+            "Gene_name": "Pathogen_Gene_Name",
+        })
+    )
 
 
 def empty_alignment_metrics(metric_cols):
@@ -139,7 +316,18 @@ def compute_alignment_metrics(seq1, seq2, aligner, metric_cols):
 print("Loading data...")
 
 match_df = load_csv(DATA_DIR / "proccesed/iedb_match_regions_long.csv")
-pathogen_data = load_csv(DATA_DIR / "intermediate/protein_metadata.csv")
+pathogen_data = load_csv(DATA_DIR / "intermediate/protein_sequences.csv")
+
+validate_required_columns(
+    match_df,
+    ["IEDB_Protein_ID", "Pathogen_Protein_ID", "Epitope_Source"],
+    "iedb_match_regions_long.csv",
+)
+validate_required_columns(
+    pathogen_data,
+    ["Protein_ID", "Sequence", "Annotation", "Gene_name"],
+    "protein_sequences.csv",
+)
 
 print(f"Long match rows: {len(match_df)}")
 
@@ -148,17 +336,24 @@ print(f"Long match rows: {len(match_df)}")
 
 match_df["Pathogen_Protein_ID"] = match_df["Pathogen_Protein_ID"].map(clean_id)
 match_df["IEDB_Protein_ID"] = match_df["IEDB_Protein_ID"].map(clean_id)
-pathogen_data["Protein_ID"] = pathogen_data["Protein_ID"].map(clean_id)
 
 match_df = match_df.dropna(
     subset=["Pathogen_Protein_ID", "IEDB_Protein_ID"]
 ).copy()
 
-pathogen_data = pathogen_data.dropna(
-    subset=["Protein_ID"]
-).copy()
-
 print(f"Rows after dropping missing protein IDs: {len(match_df)}")
+
+protein_pairs = (
+    match_df[["IEDB_Protein_ID", "Pathogen_Protein_ID"]]
+    .drop_duplicates()
+    .sort_values(["IEDB_Protein_ID", "Pathogen_Protein_ID"])
+    .reset_index(drop=True)
+)
+
+epitope_source_map = build_epitope_source_map(match_df)
+pathogen_sequences = build_pathogen_sequence_table(pathogen_data)
+
+print(f"Unique protein-protein pairs for alignment: {len(protein_pairs)}")
 
 
 # ---------------------- Load/fetch IEDB source protein FASTA ---------------------- #
@@ -200,85 +395,59 @@ if missing_iedb_ids:
     )
 
 
-# ---------------------- Prepare merge tables ---------------------- #
+# ---------------------- Prepare sequence table ---------------------- #
 
-pathogen_meta = (
-    pathogen_data[
-        [
-            "Protein_ID",
-            "Genus_species",
-            "Sequence",
-            "Strain",
-        ]
-    ]
-    .drop_duplicates(subset=["Protein_ID"])
-    .rename(columns={
-        "Protein_ID": "Pathogen_Protein_ID_merge",
-        "Genus_species": "Organism_Source",
-        "Sequence": "Pathogen_Sequence",
-    })
-)
-
-iedb_seq = (
-    uniprot_seq_df
-    .drop_duplicates(subset=["Protein_ID"])
-    .rename(columns={
-        "Protein_ID": "IEDB_Protein_ID_merge",
-    })
-)
+iedb_seq = uniprot_seq_df.rename(columns={
+    "Protein_ID": "IEDB_Protein_ID",
+})
 
 print(f"Unique IEDB proteins with sequences: {len(iedb_seq)}")
 
 
-# ---------------------- Build full alignment table ---------------------- #
-
-traceback_cols = [
-    "IEDB_Protein_ID",
-    "Pathogen_Protein_ID",
-    "Epitope_Source",
-    "Disease",
-    "Disease_stage",
-    "Response_measured",
-    "Effector_cell",
-    "Pathogen_Organism",
-    "Pathogen_Scientific_name",
-    "Pathogen_Annotation",
-    "Pathogen_Gene_Name",
-    "IEDB_Region_ID",
-    "IEDB_Region_Start",
-    "IEDB_Region_End",
-    "IEDB_Region_Length",
-]
-
-traceback_cols = [
-    col for col in traceback_cols
-    if col in match_df.columns
-]
-
-protein_pair_traceback = (
-    match_df[traceback_cols]
-    .drop_duplicates()
-)
+# ---------------------- Build protein-pair alignment table ---------------------- #
 
 full_align_analysis = (
-    protein_pair_traceback
-    .drop_duplicates(subset=["IEDB_Protein_ID", "Pathogen_Protein_ID"])
+    protein_pairs
     .merge(
-        pathogen_meta,
+        epitope_source_map,
         how="left",
-        left_on="Pathogen_Protein_ID",
-        right_on="Pathogen_Protein_ID_merge",
+        on="IEDB_Protein_ID",
+        validate="many_to_one",
+    )
+    .merge(
+        pathogen_sequences,
+        how="left",
+        on="Pathogen_Protein_ID",
+        validate="many_to_one",
     )
     .merge(
         iedb_seq,
         how="left",
-        left_on="IEDB_Protein_ID",
-        right_on="IEDB_Protein_ID_merge",
+        on="IEDB_Protein_ID",
+        validate="many_to_one",
     )
-    .drop(columns=["Pathogen_Protein_ID_merge", "IEDB_Protein_ID_merge"])
 )
 
-print(f"Unique protein-protein pairs for alignment: {len(full_align_analysis)}")
+if len(full_align_analysis) != len(protein_pairs):
+    raise RuntimeError(
+        "Protein-pair row count changed while attaching sequence metadata."
+    )
+
+missing_pathogen_ids = (
+    full_align_analysis.loc[
+        full_align_analysis["Pathogen_Sequence"].isna(),
+        "Pathogen_Protein_ID",
+    ]
+    .drop_duplicates()
+    .tolist()
+)
+
+if missing_pathogen_ids:
+    examples = ", ".join(sorted(missing_pathogen_ids)[:20])
+    raise ValueError(
+        "Matched pathogen proteins were not found in protein_sequences.csv. "
+        f"Example IDs: {examples}"
+    )
 
 unique_pathogen_proteins = full_align_analysis["Pathogen_Protein_ID"].nunique()
 print(f"Unique pathogen proteins: {unique_pathogen_proteins}")
@@ -345,7 +514,6 @@ summary_df = (
         Mean_Alignment_Length=("Alignment_Length", "mean"),
         Mean_Gap_Count=("Gap_Count", "mean"),
         N_pathogen_proteins=("Pathogen_Protein_ID", "nunique"),
-        N_protein_pairs=("IEDB_Protein_ID", "count"),
     )
     .reset_index()
     .fillna(0)

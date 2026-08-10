@@ -1,0 +1,1254 @@
+---
+title: "newest_analysis"
+format: html
+editor: visual
+---
+
+### Libraries
+
+```{r}
+library(tidyverse)
+library(patchwork)
+library(Biostrings)
+```
+
+### Paths
+
+```{r}
+### Paths
+
+base_dir <- "//wsl.localhost/Ubuntu/home/lucio/projects/CR_pipeline"
+
+base_dir <- normalizePath(
+  base_dir,
+  winslash = "/",
+  mustWork = TRUE
+)
+
+path_data <- file.path(base_dir, "data")
+path_intermediate <- file.path(path_data, "intermediate")
+path_processed <- file.path(path_data, "proccesed")
+```
+
+### Data import
+
+```{r}
+match_data <- read_csv(
+  file.path(path_processed, "iedb_match_regions_long_metadata_annotated.csv"),
+  show_col_types = FALSE
+)
+
+IEDB_data <- read_csv(
+  file.path(path_intermediate, "wrangled_IEDB.csv"),
+  show_col_types = FALSE
+)
+
+pathogen_sequences <- read_csv(
+  file.path(path_intermediate, "protein_sequences.csv"),
+  show_col_types = FALSE
+)
+
+pathogen_occurrences <- read_csv(
+  file.path(path_intermediate, "protein_occurrences.csv"),
+  show_col_types = FALSE
+)
+
+iedb_fasta <- readAAStringSet(
+  file.path(path_intermediate, "matched_iedb_source_proteins.fasta")
+)
+```
+
+### Helper functions
+
+```{r}
+parse_uniprot_id <- function(x) {
+  first_token <- x |>
+    str_trim() |>
+    str_split_i("\\s+", 1) |>
+    str_remove("^.*/")
+
+  parsed_id <- if_else(
+    str_detect(first_token, fixed("|")),
+    str_split_i(first_token, fixed("|"), 2),
+    first_token,
+    missing = NA_character_
+  )
+
+  parsed_id |>
+    str_trim() |>
+    str_to_upper()
+}
+```
+
+### Reusable summary tables
+
+```{r}
+protein_lengths <- tibble(
+  IEDB_Protein_ID = parse_uniprot_id(names(iedb_fasta)),
+  Protein_Length = width(iedb_fasta)
+) |>
+  filter(!is.na(IEDB_Protein_ID))
+
+conflicting_fasta_lengths <- protein_lengths |>
+  group_by(IEDB_Protein_ID) |>
+  summarise(
+    n_lengths = n_distinct(Protein_Length),
+    .groups = "drop"
+  ) |>
+  filter(n_lengths > 1)
+
+if (nrow(conflicting_fasta_lengths) > 0) {
+  stop(
+    "Conflicting lengths were found for repeated IEDB FASTA IDs: ",
+    paste(conflicting_fasta_lengths$IEDB_Protein_ID, collapse = ", ")
+  )
+}
+
+protein_lengths <- protein_lengths |>
+  group_by(IEDB_Protein_ID) |>
+  summarise(
+    Protein_Length = dplyr::first(Protein_Length),
+    .groups = "drop"
+  )
+```
+
+### Global filters
+
+```{r}
+histone_contaminant_ids <- c(
+  "A0AB35K8W1",
+  "A0AB35K7K7",
+  "A0AB35K6S2"
+)
+
+high_match_iedb_ids <- c(
+  "P0DMV8",
+  "P10809",
+  "P11021",
+  "P06733",
+  "P38646",
+  "Q16778",
+  "P62807",
+  "P62805"
+)
+
+match_data_clean <- match_data |>
+  mutate(
+    IEDB_Protein_ID = parse_uniprot_id(IEDB_Protein_ID),
+    Pathogen_Protein_ID = str_trim(str_to_upper(Pathogen_Protein_ID)),
+    Proteome_ID = na_if(str_trim(as.character(Proteome_ID)), "")
+  )
+
+core_match_columns <- c(
+  "IEDB_Protein_ID",
+  "Pathogen_Protein_ID",
+  "Matched_seq",
+  "Pathogen_Start",
+  "Pathogen_End",
+  "IEDB_Match_Start",
+  "IEDB_Match_End"
+)
+
+incomplete_core_matches <- match_data_clean |>
+  filter(if_any(all_of(core_match_columns), is.na))
+
+if (nrow(incomplete_core_matches) > 0) {
+  stop(
+    nrow(incomplete_core_matches),
+    " match row(s) are missing fields required to define a core match."
+  )
+}
+
+match_data_clean <- match_data_clean |>
+  group_by(across(all_of(core_match_columns))) |>
+  mutate(Match_ID = cur_group_id()) |>
+  ungroup()
+
+match_data_no_histone_contaminants <- match_data_clean |>
+  filter(
+    !(
+      Pathogen_Protein_ID %in% histone_contaminant_ids &
+        str_detect(
+          coalesce(Epitope_Source, ""),
+          regex("histone", ignore_case = TRUE)
+        )
+    )
+  )
+
+histone_filter_audit <- tibble(
+  rows_removed =
+    nrow(match_data_clean) - nrow(match_data_no_histone_contaminants),
+  core_matches_removed =
+    n_distinct(match_data_clean$Match_ID) -
+      n_distinct(match_data_no_histone_contaminants$Match_ID)
+)
+
+print(histone_filter_audit)
+```
+
+### Fig 1 Distribution of matched epitopes grouped by source protein and associated disease
+
+```{r}
+# A core match supported by several assays is counted once within each assay.
+assay_support <- match_data_no_histone_contaminants |>
+  filter(
+    !is.na(Assay_ID),
+    !is.na(Epitope_Source),
+    !is.na(Disease),
+    !str_detect(
+      Epitope_Source,
+      regex("histone", ignore_case = TRUE)
+    )
+  ) |>
+  distinct(
+    Assay_ID,
+    Epitope_Source,
+    Disease,
+    Match_ID
+  )
+
+source_disease_totals <- assay_support |>
+  group_by(Epitope_Source, Disease) |>
+  summarise(
+    total_matches = n_distinct(Match_ID),
+    .groups = "drop"
+  )
+
+assay_summary <- assay_support |>
+  count(
+    Assay_ID,
+    Epitope_Source,
+    Disease,
+    name = "n_retained_matches"
+  ) |>
+  left_join(
+    source_disease_totals,
+    by = c("Epitope_Source", "Disease")
+  ) |>
+  mutate(
+    Epitope_Disease = paste0(Epitope_Source, " (", Disease, ")"),
+    Epitope_Disease = fct_reorder(
+      Epitope_Disease,
+      total_matches,
+      .desc = TRUE
+    )
+  )
+
+fig1 <- ggplot(
+  assay_summary,
+  aes(
+    x = n_retained_matches,
+    y = reorder(as.character(Assay_ID), n_retained_matches),
+    fill = Epitope_Source
+  )
+) +
+  geom_col() +
+  facet_grid(
+    Epitope_Disease ~ .,
+    scales = "free_y",
+    space = "free_y"
+  ) +
+  scale_fill_discrete(guide = "none") +
+  scale_x_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1000),
+    labels = c("0", "1", "10", "100", "1000")
+  ) +
+  labs(
+    x = "Number of unique core matches supported by assay (log1p)",
+    y = "IEDB assays"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text.y = element_text(angle = 0, size = 7),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.spacing = unit(0.2, "lines"),
+    panel.grid = element_blank(),
+    axis.line.x = element_line(color = "black"),
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.5
+    )
+  )
+
+fig1
+```
+
+### Fig 3 Distribution of epitope matches by pathogen protein subcellular location and rsa.
+
+```{r}
+fig3_data <- match_data_no_histone_contaminants |>
+  filter(
+    !is.na(Assay_ID),
+    !is.na(IEDB_Protein_ID),
+    !is.na(Pathogen_Organism),
+    !is.na(Pathogen_Protein_ID)
+  )
+
+match_location_analysis <- fig3_data |>
+  filter(!is.na(pathogen_prot_location)) |>
+  group_by(
+    Assay_ID,
+    IEDB_Protein_ID,
+    Epitope_Source,
+    Disease,
+    pathogen_prot_location
+  ) |>
+  summarise(
+    n_matches = n_distinct(Match_ID),
+    n_pathogen_proteins = n_distinct(Pathogen_Protein_ID),
+    n_species = n_distinct(Pathogen_Organism),
+    .groups = "drop"
+  )
+
+match_rsa_analysis <- fig3_data |>
+  filter(
+    !is.na(rsa_pathogen_peptide_mean),
+    between(rsa_pathogen_peptide_mean, 0, 1)
+  ) |>
+  mutate(
+    rsa_group = cut(
+      rsa_pathogen_peptide_mean,
+      breaks = c(0, 0.25, 0.5, 0.75, Inf),
+      include.lowest = TRUE,
+      right = FALSE,
+      labels = c(
+        "0–0.25",
+        "0.25–0.5",
+        "0.5–0.75",
+        "0.75–1"
+      )
+    )
+  ) |>
+  filter(!is.na(rsa_group)) |>
+  group_by(
+    Assay_ID,
+    IEDB_Protein_ID,
+    Epitope_Source,
+    Disease,
+    rsa_group
+  ) |>
+  summarise(
+    n_matches = n_distinct(Match_ID),
+    n_pathogen_proteins = n_distinct(Pathogen_Protein_ID),
+    n_species = n_distinct(Pathogen_Organism),
+    .groups = "drop"
+  )
+
+fig3_theme <- theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    plot.title = element_text(
+      face = "bold",
+      size = 11,
+      hjust = 0.5
+    ),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 9)
+  )
+
+p_location <- ggplot(
+  match_location_analysis,
+  aes(
+    x = n_species,
+    y = n_pathogen_proteins,
+    color = pathogen_prot_location
+  )
+) +
+  geom_point(
+    position = position_jitter(
+      width = 0.15,
+      height = 0.15,
+      seed = 123
+    ),
+    size = 1.5,
+    alpha = 0.5
+  ) +
+  scale_x_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1000)
+  ) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1000)
+  ) +
+  labs(
+    title = "A. Pathogen protein subcellular location",
+    x = "Number of matching pathogen species",
+    y = "Number of unique pathogen protein IDs",
+    color = "Protein location"
+  ) +
+  fig3_theme
+
+p_rsa <- ggplot(
+  match_rsa_analysis,
+  aes(
+    x = n_species,
+    y = n_pathogen_proteins,
+    color = rsa_group
+  )
+) +
+  geom_point(
+    position = position_jitter(
+      width = 0.15,
+      height = 0.15,
+      seed = 123
+    ),
+    size = 1.5,
+    alpha = 0.5
+  ) +
+  scale_x_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1000)
+  ) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1000)
+  ) +
+  labs(
+    title = "B. Pathogen peptide relative solvent accessibility",
+    x = "Number of matching pathogen species",
+    y = "Number of unique pathogen protein IDs",
+    color = "RSA group"
+  ) +
+  fig3_theme
+
+fig3 <- (p_location + p_rsa) + plot_layout(guides = "keep") 
+fig3
+
+remove(p_location, p_rsa)
+```
+
+### Fig 4 Heatmap showing cross-reactivity potential between epitope source proteins and pathogen species
+
+```{r}
+species_epitope_joined <- match_data_no_histone_contaminants |>
+  filter(
+    !IEDB_Protein_ID %in% high_match_iedb_ids,
+    !is.na(Pathogen_Organism),
+    !is.na(Epitope_Source)
+  ) |>
+  distinct(
+    Pathogen_Organism,
+    Epitope_Source,
+    Match_ID
+  ) |>
+  count(
+    Pathogen_Organism,
+    Epitope_Source,
+    name = "n_matches"
+  ) |>
+  mutate(
+    Genus = word(Pathogen_Organism, 1),
+    Species = str_replace(
+      Pathogen_Organism,
+      "^[^ ]+ ",
+      ""
+    ),
+    Species = fct_rev(Species)
+  )
+
+fig4 <- ggplot(
+  species_epitope_joined,
+  aes(
+    x = Epitope_Source,
+    y = Species,
+    fill = n_matches
+  )
+) +
+  geom_tile(color = "grey80", linewidth = 0.4) +
+  scale_fill_viridis_c(
+    name = "Number of unique core matches",
+    option = "D"
+  ) +
+  scale_x_discrete(
+    labels = function(x) str_wrap(x, width = 30)
+  ) +
+  facet_grid(
+    Genus ~ .,
+    scales = "free_y",
+    space = "free_y"
+  ) +
+  labs(
+    x = "Epitope source",
+    y = NULL
+  ) +
+  theme_light(base_size = 7) +
+  theme(
+    axis.text.x = element_text(
+      angle = 90,
+      hjust = 1,
+      vjust = 0.5,
+      size = 7
+    ),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_blank(),
+    strip.text.y = element_text(
+      angle = 0,
+      hjust = 0,
+      face = "bold"
+    ),
+    panel.spacing = unit(0.3, "lines"),
+    panel.grid.major.x = element_line(color = "black"),
+    panel.grid.major.y = element_line(color = "grey90"),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.8
+    )
+  )
+
+fig4
+```
+
+### Figure S1 Distribution of total amino acid content per pathogen species in the pathogen protein dataset
+
+```{r}
+pathogen_sequences_clean <- pathogen_sequences |>
+  mutate(
+    Protein_ID = str_trim(str_to_upper(Protein_ID))
+  )
+
+duplicate_sequence_ids <- pathogen_sequences_clean |>
+  count(Protein_ID, name = "n_rows") |>
+  filter(n_rows > 1)
+
+if (nrow(duplicate_sequence_ids) > 0) {
+  stop(
+    "protein_sequences.csv contains duplicated Protein_ID values: ",
+    paste(duplicate_sequence_ids$Protein_ID, collapse = ", ")
+  )
+}
+
+pathogen_occurrences_clean <- pathogen_occurrences |>
+  mutate(
+    Protein_ID = str_trim(str_to_upper(Protein_ID)),
+    Proteome_ID = na_if(str_trim(as.character(Proteome_ID)), "")
+  )
+
+duplicate_occurrences <- pathogen_occurrences_clean |>
+  count(Protein_ID, Proteome_ID, name = "n_rows") |>
+  filter(n_rows > 1)
+
+if (nrow(duplicate_occurrences) > 0) {
+  stop(
+    "protein_occurrences.csv contains duplicated Protein_ID + Proteome_ID keys."
+  )
+}
+
+pathogen_data_by_species <- pathogen_occurrences_clean |>
+  left_join(
+    pathogen_sequences_clean |>
+      select(Protein_ID, Sequence),
+    by = "Protein_ID"
+  )
+
+if (any(is.na(pathogen_data_by_species$Sequence))) {
+  missing_sequence_ids <- pathogen_data_by_species |>
+    filter(is.na(Sequence)) |>
+    distinct(Protein_ID) |>
+    pull(Protein_ID)
+
+  stop(
+    "Missing sequences for pathogen occurrence IDs: ",
+    paste(missing_sequence_ids, collapse = ", ")
+  )
+}
+
+species_aa_summary <- pathogen_data_by_species |>
+  transmute(
+    Organism_Source = Genus_species,
+    Proteome_ID,
+    Protein_ID,
+    protein_len = str_length(Sequence)
+  ) |>
+  filter(
+    !is.na(Organism_Source),
+    Organism_Source != "",
+    !is.na(protein_len)
+  ) |>
+  distinct(
+    Organism_Source,
+    Proteome_ID,
+    Protein_ID,
+    .keep_all = TRUE
+  ) |>
+  group_by(Organism_Source) |>
+  summarise(
+    AA_len = sum(protein_len),
+    n_proteomes = n_distinct(Proteome_ID),
+    n_protein_occurrences = n(),
+    n_unique_protein_ids = n_distinct(Protein_ID),
+    .groups = "drop"
+  ) |>
+  arrange(desc(AA_len))
+
+
+p1 <- ggplot(
+  species_aa_summary,
+  aes(x = AA_len)
+) +
+  geom_histogram(
+    bins = 30,
+    fill = "steelblue",
+    color = "black"
+  ) +
+  scale_x_log10(
+    labels = scales::label_number(
+      scale = 1e-6,
+      accuracy = 0.1
+    )
+  ) +
+  labs(
+    x = "Total amino acids per species (millions, log10 scale)",
+    y = "Number of species"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+
+p2 <- species_aa_summary |>
+  slice_max(
+    order_by = AA_len,
+    n = 15,
+    with_ties = FALSE
+  ) |>
+  ggplot(
+    aes(
+      x = reorder(Organism_Source, AA_len),
+      y = AA_len,
+      fill = n_proteomes
+    )
+  ) +
+  geom_col() +
+  scale_y_continuous(
+    labels = scales::label_number(scale = 1e-6)
+  ) +
+  scale_fill_viridis_c(option = "D") +
+  coord_flip() +
+  labs(
+    x = "Organism",
+    y = "Total amino acids (millions)",
+    fill = "Number of proteomes"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+
+figs1 <- p1 + p2 +
+  plot_annotation(tag_levels = "A")
+
+remove(p1, p2)
+
+figs1
+```
+
+### Figure S2. Distribution of epitope per source protein in IEDB data.
+
+```{r}
+epitope_source_summary <- IEDB_data |>
+  filter(
+    !is.na(Protein_source),
+    Protein_source != ""
+  ) |>
+  group_by(Epitope_Source = Protein_source) |>
+  summarise(
+    n_epitopes = n_distinct(
+      Protein_ID,
+      Sequence,
+      epitope_start_pos,
+      epitope_end_pos
+    ),
+    diseases = paste(
+      sort(unique(Disease[!is.na(Disease) & Disease != ""])),
+      collapse = ", "
+    ),
+    .groups = "drop"
+  ) |>
+  mutate(
+    Epitope_Disease = if_else(
+      diseases == "",
+      Epitope_Source,
+      paste0(Epitope_Source, "\n(", diseases, ")")
+    )
+  ) |>
+  arrange(desc(n_epitopes))
+
+
+# A: Source proteins with the most retained epitopes
+p_top15 <- epitope_source_summary |>
+  slice_max(
+    order_by = n_epitopes,
+    n = 15,
+    with_ties = FALSE
+  ) |>
+  ggplot(aes(
+    x = reorder(Epitope_Disease, n_epitopes),
+    y = n_epitopes
+  )) +
+  geom_col(
+    fill = "steelblue",
+    color = "black"
+  ) +
+  coord_flip() +
+  labs(
+    x = "Epitope source protein",
+    y = "Number of retained epitopes"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+
+# B: Distribution across all source proteins
+p_hist <- ggplot(
+  epitope_source_summary,
+  aes(x = n_epitopes)
+) +
+  geom_histogram(
+    binwidth = 5,
+    boundary = 0,
+    fill = "steelblue",
+    color = "black"
+  ) +
+  labs(
+    x = "Number of retained epitopes per source protein",
+    y = "Number of source proteins"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+
+figs2 <- p_top15 + p_hist +
+  plot_layout(widths = c(1.4, 1)) +
+  plot_annotation(tag_levels = "A")
+
+figs2
+```
+
+### Fig S3. Distribution of pathogen protein subcellular localization.
+
+```{r}
+figS4_data <- match_data_no_histone_contaminants |>
+  distinct(
+    Pathogen_Protein_ID,
+    pathogen_prot_location
+  ) |>
+  mutate(
+    pathogen_prot_location = replace_na(
+      pathogen_prot_location,
+      "NA"
+    )
+  )
+
+figs4 <- ggplot(
+  figS4_data,
+  aes(x = forcats::fct_infreq(pathogen_prot_location))
+) +
+  geom_bar(fill = "darkseagreen3", color = "white") +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1000),
+    labels = c("0", "1", "10", "100", "1000")
+  ) +
+  labs(
+    x = "Matched pathogen protein location (DeepLoc Pro)",
+    y = "Number of unique pathogen protein IDs (log1p)"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.title.x = element_text(size = 9),
+    axis.title.y = element_text(size = 9),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+figs4
+```
+
+### Find regions of IEDB protein matched/not
+
+```{r}
+# ============================================================
+# Coverage of IEDB source proteins
+# ============================================================
+
+merge_intervals <- function(intervals) {
+  intervals <- intervals |>
+    filter(!is.na(start), !is.na(end)) |>
+    transmute(
+      start = as.integer(pmin(start, end)),
+      end = as.integer(pmax(start, end))
+    ) |>
+    distinct() |>
+    arrange(start, end)
+
+  if (nrow(intervals) == 0) {
+    return(tibble(
+      start = integer(),
+      end = integer()
+    ))
+  }
+
+  merged <- list()
+  current_start <- intervals$start[1]
+  current_end <- intervals$end[1]
+
+  if (nrow(intervals) > 1) {
+    for (i in 2:nrow(intervals)) {
+      next_start <- intervals$start[i]
+      next_end <- intervals$end[i]
+
+      # Merge overlapping or directly adjacent intervals
+      if (next_start <= current_end + 1) {
+        current_end <- max(current_end, next_end)
+      } else {
+        merged[[length(merged) + 1]] <- tibble(
+          start = current_start,
+          end = current_end
+        )
+
+        current_start <- next_start
+        current_end <- next_end
+      }
+    }
+  }
+
+  merged[[length(merged) + 1]] <- tibble(
+    start = current_start,
+    end = current_end
+  )
+
+  bind_rows(merged)
+}
+
+
+interval_length <- function(intervals) {
+  if (nrow(intervals) == 0) {
+    return(0L)
+  }
+
+  sum(intervals$end - intervals$start + 1)
+}
+
+
+intersect_intervals <- function(a, b) {
+  if (nrow(a) == 0 || nrow(b) == 0) {
+    return(tibble(
+      start = integer(),
+      end = integer()
+    ))
+  }
+
+  a_named <- a |>
+    transmute(
+      a_start = start,
+      a_end = end
+    )
+
+  b_named <- b |>
+    transmute(
+      b_start = start,
+      b_end = end
+    )
+
+  intersections <- crossing(a_named, b_named) |>
+    transmute(
+      start = pmax(a_start, b_start),
+      end = pmin(a_end, b_end)
+    ) |>
+    filter(start <= end)
+
+  merge_intervals(intersections)
+}
+
+
+# ------------------------------------------------------------
+# Regions covered by all IEDB epitopes included in the analysis
+# ------------------------------------------------------------
+
+studied_by_protein <- IEDB_data |>
+  transmute(
+    IEDB_Protein_ID = parse_uniprot_id(Protein_ID),
+    Epitope_Source = Protein_source,
+    Disease,
+    start = epitope_start_pos,
+    end = epitope_end_pos
+  ) |>
+  filter(
+    !is.na(IEDB_Protein_ID),
+    !is.na(start),
+    !is.na(end)
+  ) |>
+  group_by(
+    IEDB_Protein_ID,
+    Epitope_Source,
+    Disease
+  ) |>
+  summarise(
+    studied_intervals = list(
+      merge_intervals(
+        tibble(
+          start = start,
+          end = end
+        )
+      )
+    ),
+    .groups = "drop"
+  )
+
+
+# ------------------------------------------------------------
+# Regions with retained non-redundant exact matches
+# ------------------------------------------------------------
+
+matched_by_protein <- match_data_no_histone_contaminants |>
+  mutate(
+    IEDB_Protein_ID = str_to_upper(
+      str_trim(IEDB_Protein_ID)
+    )
+  ) |>
+  distinct(
+    Match_ID,
+    IEDB_Protein_ID,
+    Epitope_Source,
+    Disease,
+    IEDB_Match_Start,
+    IEDB_Match_End
+  ) |>
+  group_by(
+    IEDB_Protein_ID,
+    Epitope_Source,
+    Disease
+  ) |>
+  summarise(
+    matched_intervals = list(
+      merge_intervals(
+        tibble(
+          start = IEDB_Match_Start,
+          end = IEDB_Match_End
+        )
+      )
+    ),
+    .groups = "drop"
+  )
+
+
+coverage_join_columns <- c(
+  "IEDB_Protein_ID",
+  "Epitope_Source",
+  "Disease"
+)
+
+
+# Verify that every matched group can be connected to its IEDB data
+missing_studied_groups <- matched_by_protein |>
+  anti_join(
+    studied_by_protein,
+    by = coverage_join_columns
+  )
+
+if (nrow(missing_studied_groups) > 0) {
+  stop(
+    nrow(missing_studied_groups),
+    " matched protein group(s) could not be linked to IEDB_data."
+  )
+}
+
+
+# ------------------------------------------------------------
+# Calculate the three coverage categories
+# ------------------------------------------------------------
+
+protein_coverage <- matched_by_protein |>
+  inner_join(
+    studied_by_protein,
+    by = coverage_join_columns
+  ) |>
+  mutate(
+    studied_length = map_int(
+      studied_intervals,
+      interval_length
+    ),
+
+    matched_within_studied_intervals = map2(
+      studied_intervals,
+      matched_intervals,
+      intersect_intervals
+    ),
+
+    matched_within_studied_length = map_int(
+      matched_within_studied_intervals,
+      interval_length
+    )
+  ) |>
+  left_join(
+    protein_lengths,
+    by = "IEDB_Protein_ID"
+  )
+
+
+# Stop if a source-protein length is unavailable
+if (any(is.na(protein_coverage$Protein_Length))) {
+  missing_length_ids <- protein_coverage |>
+    filter(is.na(Protein_Length)) |>
+    distinct(IEDB_Protein_ID) |>
+    pull(IEDB_Protein_ID)
+
+  stop(
+    "Missing protein lengths for: ",
+    paste(missing_length_ids, collapse = ", ")
+  )
+}
+
+
+protein_coverage <- protein_coverage |>
+  mutate(
+    studied_but_not_matched_length =
+      studied_length - matched_within_studied_length,
+
+    not_studied_length =
+      Protein_Length - studied_length,
+
+    matched_pct =
+      100 * matched_within_studied_length / Protein_Length,
+
+    studied_but_not_matched_pct =
+      100 * studied_but_not_matched_length / Protein_Length,
+
+    not_studied_pct =
+      100 * not_studied_length / Protein_Length,
+
+    # Internal unique identifier; not displayed in the plot
+    Protein_Plot_ID = paste(
+      IEDB_Protein_ID,
+      Epitope_Source,
+      Disease,
+      sep = "___"
+    ),
+
+    # Label displayed in the plot
+    Protein_Label = paste0(
+      Epitope_Source,
+      "\n(",
+      Disease,
+      ")"
+    )
+  )
+
+
+# Check for coordinates extending beyond the protein length
+invalid_coverage <- protein_coverage |>
+  mutate(
+    studied_coordinates_invalid = map2_lgl(
+      studied_intervals,
+      Protein_Length,
+      \(intervals, protein_length) {
+        any(intervals$start < 1 | intervals$end > protein_length)
+      }
+    ),
+    matched_coordinates_invalid = map2_lgl(
+      matched_intervals,
+      Protein_Length,
+      \(intervals, protein_length) {
+        any(intervals$start < 1 | intervals$end > protein_length)
+      }
+    )
+  ) |>
+  filter(
+    studied_coordinates_invalid |
+      matched_coordinates_invalid |
+      studied_length > Protein_Length |
+      studied_but_not_matched_length < 0 |
+      not_studied_length < 0
+  )
+
+if (nrow(invalid_coverage) > 0) {
+  stop(
+    nrow(invalid_coverage),
+    " protein group(s) have intervals inconsistent with the protein length."
+  )
+}
+
+
+# ------------------------------------------------------------
+# Convert to long format for plotting
+# ------------------------------------------------------------
+
+protein_coverage_long <- protein_coverage |>
+  select(
+    IEDB_Protein_ID,
+    Epitope_Source,
+    Disease,
+    Protein_Plot_ID,
+    Protein_Label,
+    Protein_Length,
+    matched_pct,
+    studied_but_not_matched_pct,
+    not_studied_pct
+  ) |>
+  pivot_longer(
+    cols = c(
+      matched_pct,
+      studied_but_not_matched_pct,
+      not_studied_pct
+    ),
+    names_to = "region_type",
+    values_to = "percentage"
+  ) |>
+  mutate(
+    region_type = recode(
+      region_type,
+      matched_pct = "Matched",
+      studied_but_not_matched_pct = "Studied but not matched",
+      not_studied_pct = "Not studied"
+    ),
+    region_type = factor(
+      region_type,
+      levels = c(
+        "Matched",
+        "Studied but not matched",
+        "Not studied"
+      )
+    )
+  )
+
+
+# Labels displayed on the y-axis
+protein_plot_labels <- protein_coverage |>
+  distinct(Protein_Plot_ID, Protein_Label) |>
+  tibble::deframe()
+
+
+# ------------------------------------------------------------
+# Plot
+# ------------------------------------------------------------
+
+ggplot(
+  protein_coverage_long,
+  aes(
+    x = percentage,
+    y = fct_reorder(Protein_Plot_ID, Protein_Length),
+    fill = region_type
+  )
+) +
+  geom_col(width = 0.8) +
+  scale_x_continuous(
+    limits = c(0, 100),
+    expand = expansion(mult = c(0, 0.01))
+  ) +
+  scale_y_discrete(
+    labels = function(x) {
+      unname(protein_plot_labels[x])
+    }
+  ) +
+  labs(
+    x = "Percentage of full IEDB source-protein length",
+    y = "IEDB source protein",
+    fill = "Region type"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 5)
+  )
+```
+
+### Expansion of matches and analysis
+
+```{r}
+# Expansion audit
+expanded_rows <- nrow(match_data_clean)
+unique_core_matches <- n_distinct(match_data_clean$Match_ID)
+additional_rows <- expanded_rows - unique_core_matches
+
+expansion_audit <- tibble(
+  expanded_rows = expanded_rows,
+  unique_core_matches = unique_core_matches,
+  expansion_factor = round(expanded_rows / unique_core_matches, 2),
+  additional_rows = additional_rows,
+  percentage_increase = round(
+    100 * additional_rows / unique_core_matches,
+    1
+  )
+)
+
+print(expansion_audit)
+```
+
+### Saving neat figures
+
+```{r}
+ggsave(
+  "figures/Figure_1.png",
+  plot = fig1,
+  width = 190,
+  height = 180,
+  units = "mm"
+)
+
+ggsave(
+  "figures/Figure_3.png",
+  plot = fig3,
+  width = 180,
+  height = 100,
+  units = "mm"
+)
+
+ggsave(
+  "figures/Figure_4.png",
+  plot = fig4,
+  width = 240,
+  height = 150,
+  units = "mm"
+)
+
+ggsave(
+  "figures/Figure_S1.png",
+  plot = figs1,
+  width = 300,
+  height = 160,
+  units = "mm"
+)
+
+ggsave(
+  "figures/Figure_S2.png",
+  plot = figs2,
+  width = 300,
+  height = 160,
+  units = "mm"
+)
+
+ggsave(
+  "figures/Figure_S4.png",
+  plot = figs4,
+  width = 180,
+  height = 100,
+  units = "mm"
+)
+
+```
+
+```{r}
+match_rsa_analysis |>
+  arrange(desc(n_matches)) |>
+  dplyr::select(Epitope_Source, rsa_group, n_matches) 
+```
