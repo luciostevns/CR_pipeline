@@ -19,59 +19,6 @@ def load_input_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     )
     iedb_data = load_csv(DATA_DIR / "intermediate/wrangled_IEDB.csv")
 
-    sequence_cols = {"Protein_ID", "Sequence", "Annotation", "Gene_name"}
-    occurrence_cols = {
-        "Protein_ID",
-        "Proteome_ID",
-        "Scientific_name",
-        "Genus_species",
-        "Strain",
-    }
-
-    for name, data, required in [
-        ("protein_sequences.csv", protein_sequences, sequence_cols),
-        ("protein_occurrences.csv", protein_occurrences, occurrence_cols),
-    ]:
-        missing = required.difference(data.columns)
-        if missing:
-            raise ValueError(f"{name} is missing columns: {sorted(missing)}")
-
-    if protein_sequences["Protein_ID"].duplicated().any():
-        raise ValueError(
-            "protein_sequences.csv must contain exactly one row per Protein_ID."
-        )
-
-    if protein_occurrences.duplicated(["Protein_ID", "Proteome_ID"]).any():
-        raise ValueError(
-            "protein_occurrences.csv contains duplicate "
-            "(Protein_ID, Proteome_ID) pairs."
-        )
-
-    for name, data, columns in [
-        ("protein_sequences.csv", protein_sequences, ["Protein_ID", "Sequence"]),
-        (
-            "protein_occurrences.csv",
-            protein_occurrences,
-            ["Protein_ID", "Proteome_ID", "Genus_species"],
-        ),
-    ]:
-        for column in columns:
-            missing = data[column].isna() | data[column].astype(str).str.strip().eq("")
-            if missing.any():
-                raise ValueError(
-                    f"{name} contains {missing.sum():,} missing {column} values."
-                )
-
-    unknown_ids = protein_occurrences.loc[
-        ~protein_occurrences["Protein_ID"].isin(protein_sequences["Protein_ID"]),
-        "Protein_ID",
-    ].unique()
-    if len(unknown_ids):
-        raise ValueError(
-            "Occurrence Protein_IDs missing from protein_sequences.csv. "
-            f"Examples: {unknown_ids[:10].tolist()}"
-        )
-
     return protein_sequences, protein_occurrences, iedb_data
 
 
@@ -79,8 +26,8 @@ def prepare_epitopes(iedb_data: pd.DataFrame) -> list[tuple]:
     """
     Prepare IEDB epitopes for matching.
 
-    Epitopes without protein coordinates are removed because the downstream
-    IEDB-region assignment requires epitope_start_pos and epitope_end_pos.
+    Keep epitopes with both protein coordinates. The start position
+    is used to calculate individual match coordinates on the IEDB protein.
     """
 
     iedb_data = iedb_data.copy()
@@ -99,7 +46,7 @@ def prepare_epitopes(iedb_data: pd.DataFrame) -> list[tuple]:
 
     iedb_data = iedb_data.dropna(
         subset=["epitope_start_pos", "epitope_end_pos"]
-    ).copy()
+    )
 
     after = len(iedb_data)
 
@@ -197,7 +144,7 @@ def find_matches(
     Find all exact substring matches in pathogen protein sequences.
 
     Each unique Protein_ID is searched once. Occurrence metadata is attached
-    only after duplicate, nested-match, and IEDB-region filtering.
+    only after duplicate and nested-match filtering.
     """
 
     matches = []
@@ -294,98 +241,6 @@ def find_matches(
 
     return match_df
 
-
-def remove_exact_duplicate_matches(match_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Remove exact duplicate rows.
-    """
-
-    n_duplicates = match_df.duplicated().sum()
-
-    match_df = match_df.drop_duplicates().copy()
-
-    print(f"Exact duplicate matches removed: {n_duplicates}")
-    print(f"Matches after duplicate filtering: {len(match_df)}")
-
-    return match_df
-
-
-def add_iedb_region_ids(match_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add merged IEDB-region labels to the long match table.
-
-    Occurrence metadata is added afterward, so the final long table preserves
-    disease, assay, epitope, pathogen, match, and region traceability.
-    """
-
-    match_df = match_df.copy()
-
-    region_labeled_groups = []
-
-    grouped = match_df.groupby("IEDB_Protein_ID", dropna=False, sort=False)
-
-    print(f"Adding IEDB-region IDs for {grouped.ngroups} IEDB proteins...")
-
-    for iedb_protein_id, group in grouped:
-        group = (
-            group
-            .dropna(subset=["IEDB_Match_Start", "IEDB_Match_End"])
-            .sort_values(["IEDB_Match_Start", "IEDB_Match_End"])
-            .copy()
-        )
-
-        if group.empty:
-            continue
-
-        running_end = group["IEDB_Match_End"].cummax()
-        previous_running_end = running_end.shift(fill_value=-1)
-
-        group["Region_Number"] = (
-            group["IEDB_Match_Start"] > previous_running_end + 1
-        ).cumsum()
-
-        group["IEDB_Region_Start"] = (
-            group
-            .groupby("Region_Number")["IEDB_Match_Start"]
-            .transform("min")
-        )
-
-        group["IEDB_Region_End"] = (
-            group
-            .groupby("Region_Number")["IEDB_Match_End"]
-            .transform("max")
-        )
-
-        group["IEDB_Region_Length"] = (
-            group["IEDB_Region_End"] - group["IEDB_Region_Start"] + 1
-        )
-
-        group["IEDB_Region_ID"] = (
-            group["IEDB_Protein_ID"].astype(str)
-            + ":"
-            + group["IEDB_Region_Start"].astype(int).astype(str)
-            + "-"
-            + group["IEDB_Region_End"].astype(int).astype(str)
-        )
-
-        region_labeled_groups.append(group)
-
-    if not region_labeled_groups:
-        return pd.DataFrame()
-
-    match_df_with_regions = pd.concat(region_labeled_groups, ignore_index=True)
-
-    print(f"Long region-labeled matches: {len(match_df_with_regions)}")
-
-    return match_df_with_regions
-
-
-def unique_list(series: pd.Series) -> list:
-    """
-    Return unique non-missing values while preserving order.
-    """
-
-    return list(dict.fromkeys(series.dropna().tolist()))
 
 def remove_nested(match_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -497,19 +352,9 @@ def expand_pathogen_metadata(
         left_on="Pathogen_Protein_ID",
         right_on="Protein_ID",
         how="left",
-        validate="many_to_many",
         indicator=True,
     )
 
-    unmatched = expanded_df["_merge"].eq("left_only")
-    if unmatched.any():
-        examples = expanded_df.loc[
-            unmatched, "Pathogen_Protein_ID"
-        ].drop_duplicates().head(10).tolist()
-        raise ValueError(
-            "Matched proteins without occurrence metadata. "
-            f"Examples: {examples}"
-        )
 
     expanded_df = expanded_df.drop(columns=["Protein_ID", "_merge"])
     insert_at = original_columns.index("Pathogen_Protein_ID") + 1
@@ -525,69 +370,27 @@ def expand_pathogen_metadata(
 
     return expanded_df
 
+def add_match_ids(match_df: pd.DataFrame) -> pd.DataFrame:
+    core_match_columns = [
+        "IEDB_Protein_ID",
+        "Pathogen_Protein_ID",
+        "Matched_seq",
+        "Pathogen_Start",
+        "Pathogen_End",
+        "IEDB_Match_Start",
+        "IEDB_Match_End",
+    ]
 
-def summarize_regions(match_df_with_regions: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create a region-level summary from the long region-labeled match table.
+    match_df = match_df.copy()
 
-    This output is useful for overview plots, but biological traceback should
-    use the long table.
-    """
-
-    if match_df_with_regions.empty:
-        return pd.DataFrame()
-
-    print("Creating IEDB-region summary...")
-
-    list_cols = {
-        "Assay_ID": "Assay_IDs",
-        "Epitope_Source": "Epitope_Sources",
-        "Disease": "Diseases",
-        "Disease_stage": "Disease_stages",
-        "Response_measured": "Response_measured",
-        "Effector_cell": "Effector_cells",
-        "Pathogen_Protein_ID": "Pathogen_Protein_IDs",
-        "Proteome_ID": "Proteome_IDs",
-        "Pathogen_Organism": "Pathogen_Organisms",
-        "Pathogen_Scientific_name": "Pathogen_Scientific_names",
-        "Pathogen_Strain": "Pathogen_Strains",
-        "Pathogen_Annotation": "Pathogen_Annotations",
-        "Pathogen_Gene_Name": "Pathogen_Gene_Names",
-        "Matched_seq": "Matched_sequences",
-        "Match_Length": "Match_lengths",
-    }
-
-    region_df = (
-        match_df_with_regions
-        .groupby(
-            [
-                "IEDB_Protein_ID",
-                "IEDB_Region_ID",
-                "IEDB_Region_Start",
-                "IEDB_Region_End",
-                "IEDB_Region_Length",
-            ],
-            dropna=False,
-            sort=False,
-        )
-        .agg(
-            Number_of_supporting_matches=("Assay_ID", "size"),
-            Number_of_unique_assays=("Assay_ID", "nunique"),
-            Number_of_unique_pathogen_proteins=("Pathogen_Protein_ID", "nunique"),
-            Number_of_unique_proteomes=("Proteome_ID", "nunique"),
-            Number_of_unique_organisms=("Pathogen_Organism", "nunique"),
-            **{
-                new_col: (old_col, unique_list)
-                for old_col, new_col in list_cols.items()
-            },
-        )
-        .reset_index()
+    match_df["Match_ID"] = (
+        match_df.groupby(core_match_columns, sort=True)
+        .ngroup()
+        .add(1)
+        .astype("int64")
     )
 
-    print(f"Total IEDB regions after merging: {len(region_df)}")
-
-    return region_df
-
+    return match_df
 
 def main() -> None:
     protein_sequences, protein_occurrences, iedb_data = load_input_data()
@@ -604,26 +407,19 @@ def main() -> None:
 
     print(f"Raw matches from Aho-Corasick: {len(match_df)}")
 
-    match_df = remove_exact_duplicate_matches(match_df)
-
     match_df = remove_nested(match_df)
 
-    match_df_with_regions = add_iedb_region_ids(match_df)
+    match_df = add_match_ids(match_df)
 
-    match_df_with_regions = expand_pathogen_metadata(
-        match_df_with_regions,
+    match_df = expand_pathogen_metadata(
+        match_df,
         protein_occurrences,
     )
 
     long_output_path = DATA_DIR / "proccesed/iedb_match_regions_long.csv"
-    save_csv(match_df_with_regions, long_output_path)
-    print(f"Saved region-labeled long matches to: {long_output_path}")
+    save_csv(match_df, long_output_path)
+    print(f"Saved long matches to: {long_output_path}")
 
-    region_df = summarize_regions(match_df_with_regions)
-
-    summary_output_path = DATA_DIR / "proccesed/iedb_match_regions.csv"
-    save_csv(region_df, summary_output_path)
-    print(f"Saved region summary to: {summary_output_path}")
 
 
 if __name__ == "__main__":

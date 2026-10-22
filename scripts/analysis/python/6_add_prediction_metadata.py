@@ -627,8 +627,6 @@ def prepare_numeric_columns(
         "Epitope_End",
         "IEDB_Match_Start",
         "IEDB_Match_End",
-        "IEDB_Region_Start",
-        "IEDB_Region_End",
     ]
 
     for col in coordinate_cols:
@@ -786,8 +784,8 @@ def print_final_diagnostics(match_df_meta: pd.DataFrame) -> None:
     if "Assay_ID" in match_df_meta.columns:
         print("Unique assays:", match_df_meta["Assay_ID"].nunique())
 
-    if "IEDB_Region_ID" in match_df_meta.columns:
-        print("Unique IEDB regions:", match_df_meta["IEDB_Region_ID"].nunique())
+    if "Match_ID" in match_df_meta.columns:
+        print("Unique core matches:", match_df_meta["Match_ID"].nunique())
 
     print("\nInput metadata merge coverage:")
 
